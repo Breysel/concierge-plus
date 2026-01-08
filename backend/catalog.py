@@ -5,9 +5,12 @@ from typing import Dict, List, Any
 
 import numpy as np
 import pandas as pd
+import requests
 from rapidfuzz import fuzz, process
 
 from backend.ranking import rank_metrics
+
+CATALOG_TMP_PATH = "/tmp/catalog.csv"
 
 TEXT_COLS = [
     "album_title",
@@ -46,11 +49,16 @@ def _clean_text_series(series: pd.Series) -> pd.Series:
 
 @lru_cache(maxsize=2)
 def load_catalog(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
+    if _is_url(path):
+        path = _download_catalog(path)
+    elif not os.path.exists(path):
         raise FileNotFoundError(
             "Catalog CSV not found. Set CATALOG_CSV_PATH to a valid file path."
         )
-    df = pd.read_csv(path)
+    try:
+        df = pd.read_csv(path)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to parse catalog CSV at {path}.") from exc
 
     for col in TEXT_COLS:
         if col not in df.columns:
@@ -81,12 +89,13 @@ def load_catalog(path: str) -> pd.DataFrame:
     df["primary_instrument_norm"] = df["primary_instrument"].str.lower()
     df["soloist_instruments_norm"] = df["soloist_instruments"].str.lower()
 
+    print(f"Catalog loaded with {len(df)} rows")
     return df
 
 
 def _resolve_catalog_path() -> str:
     env_path = os.getenv("CATALOG_CSV_PATH")
-    if env_path and os.path.exists(env_path):
+    if env_path and (_is_url(env_path) or os.path.exists(env_path)):
         return env_path
 
     raise FileNotFoundError(
@@ -106,6 +115,26 @@ def _normalize_album_url(value: str) -> str:
     if value.startswith("/"):
         return f"https://www.stageplus.com{value}"
     return f"https://www.stageplus.com/{value}"
+
+
+def _is_url(value: str) -> bool:
+    return value.startswith("http://") or value.startswith("https://")
+
+
+def _download_catalog(url: str) -> str:
+    if os.path.exists(CATALOG_TMP_PATH):
+        return CATALOG_TMP_PATH
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        with open(CATALOG_TMP_PATH, "wb") as handle:
+            handle.write(response.content)
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to download catalog CSV from URL. Check CATALOG_CSV_PATH."
+        ) from exc
+    print(f"Catalog downloaded from URL to {CATALOG_TMP_PATH}")
+    return CATALOG_TMP_PATH
 
 
 def _list_filter_mask(series: pd.Series, values: List[str]) -> pd.Series:

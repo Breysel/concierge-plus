@@ -15,7 +15,7 @@ streamlit run app.py
 2. Go to https://share.streamlit.io and deploy the repo.
 3. In app settings, add secrets (do not commit secrets):
    - `ANTHROPIC_API_KEY`
-   - `CATALOG_CSV_PATH`
+   - `CATALOG_CSV_PATH` (local file path or URL)
 4. Set access to private if needed, then invite viewers from the app settings.
 
 ## API Usage
@@ -46,7 +46,13 @@ curl -X POST http://127.0.0.1:8000/chat \\
 
 ## Replace the Catalog
 
-Replace `./data/catalog.csv` with your export. The app reads it at startup and caches it.
+Set `CATALOG_CSV_PATH` to a local CSV path or a direct-download URL. The app reads it at startup and caches it.
+
+Example URL:
+
+```
+https://drive.google.com/uc?export=download&id=1wR_FcZMJeDVtKM_hGVNNDuUIOgoGvg-D
+```
 
 ## Security Notes
 
