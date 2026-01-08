@@ -1,3 +1,4 @@
+import os
 import re
 from typing import Dict, List, Any
 
@@ -45,6 +46,10 @@ def _clean_text_series(series: pd.Series) -> pd.Series:
 
 @st.cache_data(show_spinner=False)
 def load_catalog(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "Catalog CSV not found. Set CATALOG_CSV_PATH to a valid file path."
+        )
     df = pd.read_csv(path)
 
     for col in TEXT_COLS:
@@ -79,6 +84,16 @@ def load_catalog(path: str) -> pd.DataFrame:
     return df
 
 
+def _resolve_catalog_path() -> str:
+    env_path = os.getenv("CATALOG_CSV_PATH")
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    raise FileNotFoundError(
+        "Catalog CSV not found. Set CATALOG_CSV_PATH to a valid file path."
+    )
+
+
 def _normalize_album_url(value: str) -> str:
     if not value:
         return ""
@@ -109,7 +124,7 @@ def search(request: Dict[str, Any]) -> List[Dict[str, Any]]:
     filters = request.get("filters") or {}
     limit = int(request.get("limit") or 30)
 
-    df = load_catalog("./data/catalog.csv")
+    df = load_catalog(_resolve_catalog_path())
 
     deep_cuts_strict = bool(filters.get("deep_cuts_strict"))
 

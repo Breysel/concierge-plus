@@ -1,12 +1,11 @@
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from backend import catalog
-from backend.llm import call_anthropic
 from backend.prompts import (
     SYSTEM_PROMPT,
     RECO_RULES,
@@ -68,6 +67,13 @@ def infer_filters(text: str) -> Dict[str, Any]:
     return filters
 
 
+def infer_mode_and_filters(text: str) -> Dict[str, Any]:
+    return {
+        "mode": "auto",
+        "filters": infer_filters(text),
+    }
+
+
 def is_smalltalk(text: str) -> bool:
     lowered = text.strip().lower()
     if not lowered:
@@ -78,10 +84,37 @@ def is_smalltalk(text: str) -> bool:
     meta = ["who are you", "what can you do", "help", "how does this work"]
     short_reactions = ["lol", "lmao", "haha", "ok", "okay"]
 
-    return any(
-        phrase in lowered
-        for phrase in greetings + thanks + meta + short_reactions
+    if any(phrase in lowered for phrase in greetings + thanks + meta + short_reactions):
+        return True
+
+    if len(lowered.split()) <= 2:
+        return True
+
+    return False
+
+
+def call_anthropic_env(system: str, messages: List[Dict[str, str]]) -> str:
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="Missing ANTHROPIC_API_KEY in environment.",
+        )
+
+    try:
+        from anthropic import Anthropic
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    client = Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=os.getenv("CLAUDE_MODEL", "claude-3-haiku-20240307"),
+        temperature=0.2,
+        system=system,
+        messages=messages,
+        max_tokens=700,
     )
+    return response.content[0].text
 
 
 @app.post("/chat")
@@ -94,13 +127,13 @@ def chat(request: ChatRequest) -> Dict[str, str]:
         prompt = build_smalltalk_prompt(message)
         system = f"{SYSTEM_PROMPT}\n\n{SMALLTALK_RULES}"
     else:
-        filters = infer_filters(message)
+        mode_and_filters = infer_mode_and_filters(message)
         try:
             candidates = catalog.search(
                 {
                     "query": message,
-                    "mode": "auto",
-                    "filters": filters,
+                    "mode": mode_and_filters["mode"],
+                    "filters": mode_and_filters["filters"],
                     "limit": 30,
                 }
             )
@@ -117,18 +150,7 @@ def chat(request: ChatRequest) -> Dict[str, str]:
         )
         system = f"{SYSTEM_PROMPT}\n\n{RECO_RULES}"
 
-    try:
-        reply, error = call_anthropic(system, [{"role": "user", "content": prompt}])
-    except KeyError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail="Missing ANTHROPIC_API_KEY in Streamlit secrets.",
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    if error:
-        raise HTTPException(status_code=500, detail=error)
+    reply = call_anthropic_env(system, [{"role": "user", "content": prompt}])
 
     return {"reply": reply or ""}
 
