@@ -51,6 +51,16 @@ Set `CATALOG_CSV_PATH` to a local CSV path or a direct-download URL. The app rea
 Example URL:
 
 ```
+
+## Logging (Render-friendly)
+
+Set `CONCIERGE_LOG_DIR` to control where chat logs are written (default: `/tmp/concierge_plus_logs`).
+
+Admin export endpoints (optional):
+- `GET /admin/logs/chat_events.jsonl`
+- `GET /admin/logs/chat_turns.csv`
+
+To enable, set `ADMIN_TOKEN` and pass header `X-Admin-Token: <token>`. If `ADMIN_TOKEN` is not set, the endpoints return 404. Logs are ephemeral on Render free tier and reset on redeploy.
 https://drive.google.com/uc?export=download&id=1wR_FcZMJeDVtKM_hGVNNDuUIOgoGvg-D
 ```
 

@@ -1,8 +1,13 @@
 import os
+import time
+import traceback
+import uuid
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from backend import catalog
@@ -14,6 +19,13 @@ from backend.prompts import (
     build_reco_prompt,
     build_smalltalk_prompt,
 )
+from backend.telemetry import (
+    get_log_dir,
+    truncate,
+    append_csv,
+    append_jsonl,
+    extract_urls_from_markdown,
+)
 
 
 class HistoryItem(BaseModel):
@@ -24,12 +36,14 @@ class HistoryItem(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     history: Optional[List[HistoryItem]] = None
+    conversation_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
     reply: str
     mode: str
     debug: Optional[Dict[str, Any]] = None
+    conversation_id: Optional[str] = None
 
 
 app = FastAPI()
@@ -136,7 +150,9 @@ def build_conversation_context(history: List[HistoryItem]) -> str:
     return "\n".join(lines)
 
 
-def call_anthropic_env(system: str, messages: List[Dict[str, str]]) -> str:
+def call_anthropic_env(
+    system: str, messages: List[Dict[str, str]], model: Optional[str] = None
+) -> str:
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise HTTPException(
@@ -151,7 +167,7 @@ def call_anthropic_env(system: str, messages: List[Dict[str, str]]) -> str:
 
     client = Anthropic(api_key=api_key)
     response = client.messages.create(
-        model=os.getenv("CLAUDE_MODEL", "claude-3-haiku-20240307"),
+        model=model or os.getenv("CLAUDE_MODEL", "claude-3-haiku-20240307"),
         temperature=0.2,
         system=system,
         messages=messages,
@@ -162,6 +178,7 @@ def call_anthropic_env(system: str, messages: List[Dict[str, str]]) -> str:
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
+    start_time = time.time()
     message = (request.message or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message is required.")
@@ -170,59 +187,257 @@ def chat(request: ChatRequest) -> ChatResponse:
     history = history[-12:]
     debug_enabled = os.getenv("DEBUG", "").lower() == "true"
 
+    conversation_id = request.conversation_id or str(uuid.uuid4())
+    request_id = str(uuid.uuid4())
+    is_new_chat = len(history) == 0
+    turn_index = 1 + sum(1 for item in history if item.role == "user")
+    log_dir = get_log_dir()
+    jsonl_path = os.path.join(log_dir, "chat_events.jsonl")
+    csv_path = os.path.join(log_dir, "chat_turns.csv")
+    os.makedirs(log_dir, exist_ok=True)
+
+    if is_new_chat:
+        append_jsonl(
+            jsonl_path,
+            {
+                "ts_utc": datetime.now(timezone.utc).isoformat(),
+                "event": "chat_start",
+                "conversation_id": conversation_id,
+                "request_id": request_id,
+                "turn_index": turn_index,
+                "user_message": message,
+            },
+        )
+
+    mode = ""
+    prompt_type = ""
+    used_catalog = False
+    candidate_count = 0
+    top_candidates: List[Dict[str, Any]] = []
+    system_prompt = ""
+    user_prompt = ""
+    assistant_reply = ""
+    error_detail = None
+    model_name = os.getenv("CLAUDE_MODEL", "claude-3-haiku-20240307")
     conversation_context = build_conversation_context(history)
     is_first_turn = len(history) == 0
 
-    if should_smalltalk(message, history):
-        prompt = build_smalltalk_prompt(
-            message,
-            conversation_context=conversation_context,
-            is_first_turn=is_first_turn,
-        )
-        rules = SMALLTALK_RULES_FIRST_TURN if is_first_turn else SMALLTALK_RULES_ONGOING
-        system = f"{SYSTEM_PROMPT}\n\n{rules}"
-        reply = call_anthropic_env(system, [{"role": "user", "content": prompt}])
-        response = ChatResponse(reply=reply or "", mode="smalltalk")
-        if debug_enabled:
-            response.debug = {"used_catalog": False, "candidate_count": 0}
-        return response
-
-    mode_and_filters = infer_mode_and_filters(message)
     try:
-        candidates = catalog.search(
+        if should_smalltalk(message, history):
+            prompt_type = "smalltalk"
+            mode = "smalltalk"
+            prompt = build_smalltalk_prompt(
+                message,
+                conversation_context=conversation_context,
+                is_first_turn=is_first_turn,
+            )
+            rules = (
+                SMALLTALK_RULES_FIRST_TURN if is_first_turn else SMALLTALK_RULES_ONGOING
+            )
+            system = f"{SYSTEM_PROMPT}\n\n{rules}"
+            system_prompt = system
+            user_prompt = prompt
+            assistant_reply = call_anthropic_env(
+                system, [{"role": "user", "content": prompt}], model=model_name
+            )
+        else:
+            mode = "reco"
+            prompt_type = "reco"
+            mode_and_filters = infer_mode_and_filters(message)
+            try:
+                candidates = catalog.search(
+                    {
+                        "query": message,
+                        "mode": mode_and_filters["mode"],
+                        "filters": mode_and_filters["filters"],
+                        "limit": 30,
+                    }
+                )
+            except FileNotFoundError:
+                assistant_reply = (
+                    "Catalog isn't loaded on this server yet — I can still chat, but "
+                    "can't recommend albums until the catalog is connected."
+                )
+                candidates = []
+
+            candidate_count = len(candidates)
+            used_catalog = candidate_count > 0
+            top_candidates = [
+                {
+                    "album_title": item.get("album_title"),
+                    "album_url": item.get("album_url"),
+                    "score_poplite": item.get("score_poplite"),
+                    "score_hidden_gem": item.get("score_hidden_gem"),
+                    "score_sticky": item.get("score_sticky"),
+                    "unique_users": item.get("unique_users"),
+                }
+                for item in candidates[:5]
+            ]
+
+            if candidates:
+                history_summary = build_history_summary(history, message)
+                prompt = build_reco_prompt(
+                    message,
+                    candidates,
+                    conversation_context=conversation_context or None,
+                    history_summary=history_summary or None,
+                )
+                system = f"{SYSTEM_PROMPT}\n\n{RECO_RULES}"
+                system_prompt = system
+                user_prompt = prompt
+                assistant_reply = call_anthropic_env(
+                    system, [{"role": "user", "content": prompt}], model=model_name
+                )
+    except Exception as exc:
+        error_detail = f"{exc.__class__.__name__}: {exc}\n{traceback.format_exc(limit=5)}"
+        latency_ms = int((time.time() - start_time) * 1000)
+        append_jsonl(
+            jsonl_path,
             {
-                "query": message,
-                "mode": mode_and_filters["mode"],
-                "filters": mode_and_filters["filters"],
-                "limit": 30,
-            }
+                "ts_utc": datetime.now(timezone.utc).isoformat(),
+                "event": "chat_turn",
+                "conversation_id": conversation_id,
+                "request_id": request_id,
+                "turn_index": turn_index,
+                "user_message": message,
+                "mode": mode,
+                "used_catalog": used_catalog,
+                "candidate_count": candidate_count,
+                "top_candidates": top_candidates,
+                "prompt_type": prompt_type,
+                "anthropic_model": model_name,
+                "system_prompt_sent_to_claude": truncate(system_prompt),
+                "user_prompt_sent_to_claude": truncate(user_prompt),
+                "system_prompt_len": len(system_prompt),
+                "user_prompt_len": len(user_prompt),
+                "assistant_reply": assistant_reply,
+                "latency_ms": latency_ms,
+                "error": error_detail,
+            },
         )
-    except FileNotFoundError:
-        response = ChatResponse(
-            reply=(
-                "Catalog isn't loaded on this server yet — I can still chat, but "
-                "can't recommend albums until the catalog is connected."
-            ),
-            mode="reco",
+        append_csv(
+            csv_path,
+            header=[
+                "ts_utc",
+                "conversation_id",
+                "turn_index",
+                "user_message",
+                "mode",
+                "candidate_count",
+                "reply_preview",
+                "recommended_urls",
+                "latency_ms",
+                "error_flag",
+            ],
+            row=[
+                datetime.now(timezone.utc).isoformat(),
+                conversation_id,
+                turn_index,
+                message,
+                mode,
+                candidate_count,
+                (assistant_reply or "")[:160],
+                "|".join(extract_urls_from_markdown(assistant_reply)),
+                latency_ms,
+                True,
+            ],
         )
-        if debug_enabled:
-            response.debug = {"used_catalog": False, "candidate_count": 0}
-        return response
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong while generating a response.",
+        )
 
-    history_summary = build_history_summary(history, message)
-    prompt = build_reco_prompt(
-        message,
-        candidates,
-        conversation_context=conversation_context or None,
-        history_summary=history_summary or None,
-    )
-    system = f"{SYSTEM_PROMPT}\n\n{RECO_RULES}"
-    reply = call_anthropic_env(system, [{"role": "user", "content": prompt}])
-
-    response = ChatResponse(reply=reply or "", mode="reco")
+    response = ChatResponse(reply=assistant_reply or "", mode=mode, conversation_id=conversation_id)
     if debug_enabled:
-        response.debug = {"used_catalog": True, "candidate_count": len(candidates)}
+        response.debug = {
+            "used_catalog": used_catalog,
+            "candidate_count": candidate_count,
+        }
+
+    latency_ms = int((time.time() - start_time) * 1000)
+    append_jsonl(
+        jsonl_path,
+        {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            "event": "chat_turn",
+            "conversation_id": conversation_id,
+            "request_id": request_id,
+            "turn_index": turn_index,
+            "user_message": message,
+            "mode": mode,
+            "used_catalog": used_catalog,
+            "candidate_count": candidate_count,
+            "top_candidates": top_candidates,
+            "prompt_type": prompt_type,
+            "anthropic_model": model_name,
+            "system_prompt_sent_to_claude": truncate(system_prompt),
+            "user_prompt_sent_to_claude": truncate(user_prompt),
+            "system_prompt_len": len(system_prompt),
+            "user_prompt_len": len(user_prompt),
+            "assistant_reply": assistant_reply,
+            "latency_ms": latency_ms,
+            "error": error_detail,
+        },
+    )
+    append_csv(
+        csv_path,
+        header=[
+            "ts_utc",
+            "conversation_id",
+            "turn_index",
+            "user_message",
+            "mode",
+            "candidate_count",
+            "reply_preview",
+            "recommended_urls",
+            "latency_ms",
+            "error_flag",
+        ],
+        row=[
+            datetime.now(timezone.utc).isoformat(),
+            conversation_id,
+            turn_index,
+            message,
+            mode,
+            candidate_count,
+            (assistant_reply or "")[:160],
+            "|".join(extract_urls_from_markdown(assistant_reply)),
+            latency_ms,
+            False,
+        ],
+    )
+
     return response
+
+
+@app.get("/admin/logs/chat_events.jsonl")
+def download_chat_events(
+    x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+) -> FileResponse:
+    admin_token = os.getenv("ADMIN_TOKEN")
+    if not admin_token:
+        raise HTTPException(status_code=404, detail="Not found")
+    if x_admin_token != admin_token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    path = os.path.join(get_log_dir(), "chat_events.jsonl")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Log not found")
+    return FileResponse(path, media_type="application/jsonl")
+
+
+@app.get("/admin/logs/chat_turns.csv")
+def download_chat_turns(
+    x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+) -> FileResponse:
+    admin_token = os.getenv("ADMIN_TOKEN")
+    if not admin_token:
+        raise HTTPException(status_code=404, detail="Not found")
+    if x_admin_token != admin_token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    path = os.path.join(get_log_dir(), "chat_turns.csv")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Log not found")
+    return FileResponse(path, media_type="text/csv")
 
 
 if __name__ == "__main__":
