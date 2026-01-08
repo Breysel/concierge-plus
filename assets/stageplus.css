@@ -1,0 +1,116 @@
+:root {
+  color-scheme: dark;
+}
+
+html, body, [data-testid="stAppViewContainer"] {
+  background: linear-gradient(180deg, var(--stage-bg, #0b0f16) 0%, #070a10 100%);
+}
+
+[data-testid="stHeader"] {
+  background: transparent;
+}
+
+.stageplus-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  backdrop-filter: blur(12px);
+  background: rgba(10, 14, 22, 0.85);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 14px 0;
+}
+
+.stageplus-header .title {
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--stage-text, #f3f6ff);
+}
+
+.stageplus-header .subtitle {
+  font-size: 0.95rem;
+  color: var(--stage-muted, #9aa7b8);
+  margin-top: 2px;
+}
+
+.stageplus-container {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 0 12px 24px;
+}
+
+[data-testid="stChatMessage"] {
+  max-width: 900px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+[data-testid="stChatMessageAvatar"] {
+  display: none;
+}
+
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] {
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+[data-testid="stChatMessage"] > div {
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+}
+
+[data-testid="stChatMessage"][data-testid*="user"] > div {
+  background: rgba(18, 26, 38, 0.72);
+  margin-left: auto;
+}
+
+[data-testid="stChatMessage"][data-testid*="assistant"] > div {
+  background: rgba(10, 16, 26, 0.6);
+  margin-right: auto;
+}
+
+[data-testid="stChatInput"] textarea,
+[data-testid="stTextInput"] input,
+[data-testid="stSelectbox"] div,
+[data-testid="stMultiSelect"] div {
+  background: rgba(10, 14, 22, 0.9) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  border-radius: 12px !important;
+  color: var(--stage-text, #f3f6ff) !important;
+}
+
+[data-testid="stSelectbox"] svg,
+[data-testid="stMultiSelect"] svg {
+  color: var(--stage-text, #f3f6ff) !important;
+}
+
+[data-testid="stButton"] button {
+  background: var(--stage-accent, #ffd400) !important;
+  color: #0a0a0a !important;
+  border-radius: 999px !important;
+  border: none !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.3px;
+  padding: 0.55rem 1.3rem;
+}
+
+[data-testid="stButton"] button:hover {
+  filter: brightness(1.06);
+}
+
+.stageplus-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--stage-muted, #9aa7b8);
+  font-size: 0.8rem;
+}
+
+.stageplus-muted {
+  color: var(--stage-muted, #9aa7b8);
+}
