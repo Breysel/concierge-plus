@@ -1,10 +1,10 @@
 import os
 import re
+from functools import lru_cache
 from typing import Dict, List, Any
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 from rapidfuzz import fuzz, process
 
 from backend.ranking import rank_metrics
@@ -44,7 +44,7 @@ def _clean_text_series(series: pd.Series) -> pd.Series:
     return series
 
 
-@st.cache_data(show_spinner=False)
+@lru_cache(maxsize=2)
 def load_catalog(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         raise FileNotFoundError(

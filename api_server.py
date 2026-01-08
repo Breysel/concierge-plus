@@ -15,9 +15,14 @@ from backend.prompts import (
 )
 
 
+class HistoryItem(BaseModel):
+    role: str
+    content: str
+
+
 class ChatRequest(BaseModel):
     message: str
-    conversation_context: Optional[str] = None
+    history: Optional[List[HistoryItem]] = None
 
 
 app = FastAPI()
@@ -74,7 +79,7 @@ def infer_mode_and_filters(text: str) -> Dict[str, Any]:
     }
 
 
-def is_smalltalk(text: str) -> bool:
+def is_smalltalk(text: str, history: List[HistoryItem]) -> bool:
     lowered = text.strip().lower()
     if not lowered:
         return True
@@ -83,14 +88,61 @@ def is_smalltalk(text: str) -> bool:
     thanks = ["thanks", "thank you", "thx", "appreciate it", "cheers"]
     meta = ["who are you", "what can you do", "help", "how does this work"]
     short_reactions = ["lol", "lmao", "haha", "ok", "okay"]
+    music_keywords = [
+        "music",
+        "classical",
+        "composer",
+        "orchestra",
+        "orchestral",
+        "symphony",
+        "concerto",
+        "quartet",
+        "baroque",
+        "romantic",
+        "atmos",
+        "dolby",
+        "piano",
+        "violin",
+        "cello",
+        "bach",
+        "mozart",
+        "beethoven",
+        "chopin",
+        "tchaikovsky",
+        "dark",
+        "calm",
+        "relax",
+        "focus",
+        "dramatic",
+        "sleep",
+        "study",
+    ]
+
+    has_music_intent = any(keyword in lowered for keyword in music_keywords)
+    has_history = any(item.role == "user" and item.content for item in history)
+
+    if has_history:
+        if any(phrase in lowered for phrase in greetings + thanks + meta + short_reactions):
+            return not has_music_intent
+        return False
 
     if any(phrase in lowered for phrase in greetings + thanks + meta + short_reactions):
-        return True
+        return not has_music_intent
 
-    if len(lowered.split()) <= 2:
+    if len(lowered.split()) <= 2 and not has_music_intent:
         return True
 
     return False
+
+
+def build_history_summary(history: List[HistoryItem], current_message: str) -> str:
+    user_messages = [item.content for item in history if item.role == "user" and item.content]
+    recent = user_messages[-2:]
+    if not recent:
+        return ""
+    previous = "; ".join(recent)
+    summary = f"User previously asked: {previous}. Now asks: {current_message}."
+    return summary[:200]
 
 
 def call_anthropic_env(system: str, messages: List[Dict[str, str]]) -> str:
@@ -123,36 +175,55 @@ def chat(request: ChatRequest) -> Dict[str, str]:
     if not message:
         raise HTTPException(status_code=400, detail="Message is required.")
 
-    if is_smalltalk(message):
+    history = request.history or []
+    history = history[-12:]
+    debug_enabled = os.getenv("DEBUG", "").lower() == "true"
+
+    if is_smalltalk(message, history):
         prompt = build_smalltalk_prompt(message)
         system = f"{SYSTEM_PROMPT}\n\n{SMALLTALK_RULES}"
-    else:
-        mode_and_filters = infer_mode_and_filters(message)
-        try:
-            candidates = catalog.search(
-                {
-                    "query": message,
-                    "mode": mode_and_filters["mode"],
-                    "filters": mode_and_filters["filters"],
-                    "limit": 30,
-                }
-            )
-        except FileNotFoundError as exc:
-            raise HTTPException(
-                status_code=500,
-                detail=str(exc),
-            ) from exc
+        reply = call_anthropic_env(system, [{"role": "user", "content": prompt}])
+        response = {"reply": reply or "", "mode": "smalltalk"}
+        if debug_enabled:
+            response["debug"] = {"used_catalog": False, "candidate_count": 0}
+        return response
 
-        prompt = build_reco_prompt(
-            message,
-            candidates,
-            conversation_context=request.conversation_context,
+    mode_and_filters = infer_mode_and_filters(message)
+    try:
+        candidates = catalog.search(
+            {
+                "query": message,
+                "mode": mode_and_filters["mode"],
+                "filters": mode_and_filters["filters"],
+                "limit": 30,
+            }
         )
-        system = f"{SYSTEM_PROMPT}\n\n{RECO_RULES}"
+    except FileNotFoundError:
+        response = {
+            "reply": (
+                "Catalog isn't loaded on this server yet — I can still chat, but "
+                "can't recommend albums until the catalog is connected."
+            ),
+            "mode": "reco",
+        }
+        if debug_enabled:
+            response["debug"] = {"used_catalog": False, "candidate_count": 0}
+        return response
 
+    history_summary = build_history_summary(history, message)
+    prompt = build_reco_prompt(
+        message,
+        candidates,
+        conversation_context=None,
+        history_summary=history_summary or None,
+    )
+    system = f"{SYSTEM_PROMPT}\n\n{RECO_RULES}"
     reply = call_anthropic_env(system, [{"role": "user", "content": prompt}])
 
-    return {"reply": reply or ""}
+    response = {"reply": reply or "", "mode": "reco"}
+    if debug_enabled:
+        response["debug"] = {"used_catalog": True, "candidate_count": len(candidates)}
+    return response
 
 
 if __name__ == "__main__":

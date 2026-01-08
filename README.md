@@ -31,7 +31,17 @@ Example request:
 ```bash
 curl -X POST http://127.0.0.1:8000/chat \\
   -H "Content-Type: application/json" \\
-  -d '{"message":"bach, something dark","conversation_context":""}'
+  -d '{"message":"bach, something dark","history":[]}'
+```
+
+## Frontend integration (Lovable)
+
+Send a POST to `/chat` with a message and optional history. The reply is markdown.
+
+```bash
+curl -X POST http://127.0.0.1:8000/chat \\
+  -H "Content-Type: application/json" \\
+  -d '{"message":"Bach, but something dark","history":[{"role":"user","content":"Bach"}]}'
 ```
 
 ## Replace the Catalog
