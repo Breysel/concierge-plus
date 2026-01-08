@@ -14,8 +14,8 @@ streamlit run app.py
 1. Push this repo to GitHub.
 2. Go to https://share.streamlit.io and deploy the repo.
 3. In app settings, add secrets (do not commit secrets):
-   - `OPENAI_API_KEY`
    - `ANTHROPIC_API_KEY`
+   - `CATALOG_CSV_PATH`
 4. Set access to private if needed, then invite viewers from the app settings.
 
 ## API Usage
@@ -40,6 +40,7 @@ Replace `./data/catalog.csv` with your export. The app reads it at startup and c
 
 ## Security Notes
 
+- This repo is public: do not commit catalog files or secrets.
 - Never commit API keys.
 - Use `.streamlit/secrets.toml` locally or secrets in Streamlit Cloud.
 
