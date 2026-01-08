@@ -20,35 +20,46 @@ Hard rules:
 - Do NOT use stage directions or descriptions like "greets warmly" or "smiles."
 """.strip()
 
-SMALLTALK_RULES = """
+SMALLTALK_RULES_FIRST_TURN = """
 You are a Stage+ concierge for classical music.
 Tone: warm, conversational, slightly playful, non-snobby.
 
 Rules:
 - Do NOT recommend albums.
 - Keep it short and charming.
-- Mention this is the Stage+ Concierge MVP and it recommends albums from the Stage+ catalog.
+- Mention once that you recommend albums from the Stage+ catalog.
 - Offer 3 example prompts as bullets:
   - "Bach, but something dark"
   - "Hidden gems for piano"
   - "Dolby Atmos orchestral"
 - Ask a single starter question.
-- Do NOT use stage directions or descriptions like "greets warmly" or "smiles."
 """.strip()
+
+SMALLTALK_RULES_ONGOING = """
+You are a Stage+ concierge for classical music.
+Tone: warm, conversational, slightly playful, non-snobby.
+
+Rules:
+- This is an ONGOING conversation. Do NOT reintroduce yourself. Do NOT show onboarding bullets.
+- Do NOT recommend specific albums in this message.
+- Keep it to 1–3 sentences.
+- Pivot back to music with ONE question (e.g., mood / composer / instrument / “popular vs hidden gems”).
+""".strip()
+
 
 RECO_OUTPUT_FORMAT = """
 OUTPUT FORMAT (exactly this structure):
 
 {one short mirroring sentence}
 
-1) **[{album_title}]({album_url})** (if no album_url, use **{album_title}**)
+1) **[{album_title} — {artists}]({album_url})** (if no album_url, use **{album_title} — {artists}**)
 {2-3 sentences explaining why it fits, in natural prose.}
 {If is_atmos is true, you may add: "Also available in Dolby Atmos."}
 
-2) **[{album_title}]({album_url})** (if no album_url, use **{album_title}**)
+2) **[{album_title} — {artists}]({album_url})** (if no album_url, use **{album_title} — {artists}**)
 {2-3 sentences}
 
-3) **[{album_title}]({album_url})** (if no album_url, use **{album_title}**)
+3) **[{album_title} — {artists}]({album_url})** (if no album_url, use **{album_title} — {artists}**)
 {2-3 sentences}
 
 Follow-up: {one short knob question}
@@ -108,9 +119,16 @@ def build_reco_prompt(
     )
 
 
-def build_smalltalk_prompt(user_message: str) -> str:
-    return (
-        f"User message: {user_message}\n\n"
-        f"{SMALLTALK_RULES}\n\n"
-        "Now respond."
-    )
+def build_smalltalk_prompt(
+    user_message: str,
+    conversation_context: Optional[str] = None,
+    is_first_turn: bool = False,
+) -> str:
+    rules = SMALLTALK_RULES_FIRST_TURN if is_first_turn else SMALLTALK_RULES_ONGOING
+    context = ""
+    if conversation_context:
+        context = (
+            "Recent conversation (for continuity):\n"
+            f"{conversation_context[:1200]}\n\n"
+        )
+    return f"{context}User message: {user_message}\n\n{rules}\n\nNow respond."

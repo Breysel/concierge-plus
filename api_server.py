@@ -9,7 +9,8 @@ from backend import catalog
 from backend.prompts import (
     SYSTEM_PROMPT,
     RECO_RULES,
-    SMALLTALK_RULES,
+    SMALLTALK_RULES_FIRST_TURN,
+    SMALLTALK_RULES_ONGOING,
     build_reco_prompt,
     build_smalltalk_prompt,
 )
@@ -85,60 +86,35 @@ def infer_mode_and_filters(text: str) -> Dict[str, Any]:
     }
 
 
-def is_smalltalk(text: str, history: List[HistoryItem]) -> bool:
+def should_smalltalk(text: str, history: List[HistoryItem]) -> bool:
     lowered = text.strip().lower()
     if not lowered:
-        return True
-
-    greetings = ["hello", "hey", "hi", "hola", "guten tag", "hallo", "yo"]
-    thanks = ["thanks", "thank you", "thx", "appreciate it", "cheers"]
-    meta = ["who are you", "what can you do", "help", "how does this work"]
-    short_reactions = ["lol", "lmao", "haha", "ok", "okay"]
-    music_keywords = [
-        "music",
-        "classical",
-        "composer",
-        "orchestra",
-        "orchestral",
-        "symphony",
-        "concerto",
-        "quartet",
-        "baroque",
-        "romantic",
-        "atmos",
-        "dolby",
-        "piano",
-        "violin",
-        "cello",
-        "bach",
-        "mozart",
-        "beethoven",
-        "chopin",
-        "tchaikovsky",
-        "dark",
-        "calm",
-        "relax",
-        "focus",
-        "dramatic",
-        "sleep",
-        "study",
-    ]
-
-    has_music_intent = any(keyword in lowered for keyword in music_keywords)
-    has_history = any(item.role == "user" and item.content for item in history)
-
-    if has_history:
-        if any(phrase in lowered for phrase in greetings + thanks + meta + short_reactions):
-            return not has_music_intent
         return False
 
-    if any(phrase in lowered for phrase in greetings + thanks + meta + short_reactions):
-        return not has_music_intent
+    smalltalk_triggers = [
+        "hi",
+        "hello",
+        "hey",
+        "thanks",
+        "thank you",
+        "help",
+        "what can you do",
+        "who are you",
+    ]
+    reco_intent = [
+        "something funny",
+        "something dark",
+        "something calm",
+        "recommend",
+        "give me",
+        "music for",
+        "suggest",
+    ]
 
-    if len(lowered.split()) <= 2 and not has_music_intent:
-        return True
+    if any(phrase in lowered for phrase in reco_intent):
+        return False
 
-    return False
+    return any(phrase in lowered for phrase in smalltalk_triggers)
 
 
 def build_history_summary(history: List[HistoryItem], current_message: str) -> str:
@@ -149,6 +125,15 @@ def build_history_summary(history: List[HistoryItem], current_message: str) -> s
     previous = "; ".join(recent)
     summary = f"User previously asked: {previous}. Now asks: {current_message}."
     return summary[:200]
+
+
+def build_conversation_context(history: List[HistoryItem]) -> str:
+    recent = history[-6:]
+    lines = []
+    for item in recent:
+        if item.content:
+            lines.append(f"{item.role}: {item.content}")
+    return "\n".join(lines)
 
 
 def call_anthropic_env(system: str, messages: List[Dict[str, str]]) -> str:
@@ -185,9 +170,17 @@ def chat(request: ChatRequest) -> ChatResponse:
     history = history[-12:]
     debug_enabled = os.getenv("DEBUG", "").lower() == "true"
 
-    if is_smalltalk(message, history):
-        prompt = build_smalltalk_prompt(message)
-        system = f"{SYSTEM_PROMPT}\n\n{SMALLTALK_RULES}"
+    conversation_context = build_conversation_context(history)
+    is_first_turn = len(history) == 0
+
+    if should_smalltalk(message, history):
+        prompt = build_smalltalk_prompt(
+            message,
+            conversation_context=conversation_context,
+            is_first_turn=is_first_turn,
+        )
+        rules = SMALLTALK_RULES_FIRST_TURN if is_first_turn else SMALLTALK_RULES_ONGOING
+        system = f"{SYSTEM_PROMPT}\n\n{rules}"
         reply = call_anthropic_env(system, [{"role": "user", "content": prompt}])
         response = ChatResponse(reply=reply or "", mode="smalltalk")
         if debug_enabled:
@@ -220,7 +213,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     prompt = build_reco_prompt(
         message,
         candidates,
-        conversation_context=None,
+        conversation_context=conversation_context or None,
         history_summary=history_summary or None,
     )
     system = f"{SYSTEM_PROMPT}\n\n{RECO_RULES}"
