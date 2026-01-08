@@ -25,6 +25,12 @@ class ChatRequest(BaseModel):
     history: Optional[List[HistoryItem]] = None
 
 
+class ChatResponse(BaseModel):
+    reply: str
+    mode: str
+    debug: Optional[Dict[str, Any]] = None
+
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -169,8 +175,8 @@ def call_anthropic_env(system: str, messages: List[Dict[str, str]]) -> str:
     return response.content[0].text
 
 
-@app.post("/chat")
-def chat(request: ChatRequest) -> Dict[str, str]:
+@app.post("/chat", response_model=ChatResponse)
+def chat(request: ChatRequest) -> ChatResponse:
     message = (request.message or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message is required.")
@@ -183,9 +189,9 @@ def chat(request: ChatRequest) -> Dict[str, str]:
         prompt = build_smalltalk_prompt(message)
         system = f"{SYSTEM_PROMPT}\n\n{SMALLTALK_RULES}"
         reply = call_anthropic_env(system, [{"role": "user", "content": prompt}])
-        response = {"reply": reply or "", "mode": "smalltalk"}
+        response = ChatResponse(reply=reply or "", mode="smalltalk")
         if debug_enabled:
-            response["debug"] = {"used_catalog": False, "candidate_count": 0}
+            response.debug = {"used_catalog": False, "candidate_count": 0}
         return response
 
     mode_and_filters = infer_mode_and_filters(message)
@@ -199,15 +205,15 @@ def chat(request: ChatRequest) -> Dict[str, str]:
             }
         )
     except FileNotFoundError:
-        response = {
-            "reply": (
+        response = ChatResponse(
+            reply=(
                 "Catalog isn't loaded on this server yet — I can still chat, but "
                 "can't recommend albums until the catalog is connected."
             ),
-            "mode": "reco",
-        }
+            mode="reco",
+        )
         if debug_enabled:
-            response["debug"] = {"used_catalog": False, "candidate_count": 0}
+            response.debug = {"used_catalog": False, "candidate_count": 0}
         return response
 
     history_summary = build_history_summary(history, message)
@@ -220,9 +226,9 @@ def chat(request: ChatRequest) -> Dict[str, str]:
     system = f"{SYSTEM_PROMPT}\n\n{RECO_RULES}"
     reply = call_anthropic_env(system, [{"role": "user", "content": prompt}])
 
-    response = {"reply": reply or "", "mode": "reco"}
+    response = ChatResponse(reply=reply or "", mode="reco")
     if debug_enabled:
-        response["debug"] = {"used_catalog": True, "candidate_count": len(candidates)}
+        response.debug = {"used_catalog": True, "candidate_count": len(candidates)}
     return response
 
 
