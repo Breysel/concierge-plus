@@ -75,6 +75,12 @@ Render Disk is mounted at an absolute path (example: `/var/data`). Suggested env
 - `CLAUDE_MAX_TOKENS`, `CLAUDE_TEMPERATURE`
 - `PRELOAD_CATALOG=1` (default)
 
+## Model configuration (optional)
+
+- `CLAUDE_ROUTER_MODEL` (default: `claude-3-5-haiku-20241022`)
+- `CLAUDE_WRITER_MODEL` (default: `claude-3-5-sonnet-20241022`)
+These are not secrets and may be set via environment variables.
+
 ## Sanity checks (manual)
 
 - `/health` returns `version: router-v2` after deploy.

@@ -3,8 +3,8 @@ from functools import lru_cache
 from typing import List, Dict, Optional, Tuple, Generator
 
 
-DEFAULT_WRITER_MODEL = "claude-3-haiku-20240307"
-DEFAULT_ROUTER_MODEL = "claude-3-haiku-20240307"
+DEFAULT_ROUTER_MODEL = "claude-3-5-haiku-20241022"
+DEFAULT_WRITER_MODEL = "claude-3-5-sonnet-20241022"
 
 
 def get_secret(name: str) -> Optional[str]:
@@ -82,8 +82,11 @@ def call_anthropic_writer(
         return None, "Missing ANTHROPIC_API_KEY"
 
     try:
-        resolved_model = model or os.getenv("CLAUDE_WRITER_MODEL") or os.getenv(
-            "CLAUDE_MODEL", DEFAULT_WRITER_MODEL
+        resolved_model = (
+            model
+            or os.getenv("CLAUDE_WRITER_MODEL")
+            or os.getenv("CLAUDE_MODEL")
+            or DEFAULT_WRITER_MODEL
         )
         resolved_temp = (
             temperature if temperature is not None else float(os.getenv("CLAUDE_TEMPERATURE", "0.3"))
@@ -163,9 +166,10 @@ def call_anthropic_router(
     try:
         resolved_model = model or os.getenv("CLAUDE_ROUTER_MODEL", DEFAULT_ROUTER_MODEL)
         resolved_temp = 0.0 if temperature is None else float(temperature)
-        resolved_max_tokens = int(os.getenv("CLAUDE_ROUTER_MAX_TOKENS", "120"))
+        resolved_max_tokens = int(os.getenv("CLAUDE_ROUTER_MAX_TOKENS", "200"))
         if max_tokens is not None:
             resolved_max_tokens = int(max_tokens)
+        resolved_max_tokens = min(resolved_max_tokens, 200)
         resolved_timeout = int(os.getenv("CLAUDE_ROUTER_TIMEOUT", "12"))
         if timeout is not None:
             resolved_timeout = int(timeout)

@@ -30,7 +30,12 @@ from backend.telemetry import (
     append_jsonl,
     extract_urls_from_markdown,
 )
-from backend.llm import call_anthropic_router, call_anthropic_writer
+from backend.llm import (
+    call_anthropic_router,
+    call_anthropic_writer,
+    DEFAULT_ROUTER_MODEL,
+    DEFAULT_WRITER_MODEL,
+)
 
 VERSION = "router-v2"
 
@@ -573,6 +578,12 @@ def chat(request: ChatRequest) -> ChatResponse:
     router_raw_text = ""
     router_used = False
     router_ms = 0
+    router_model = os.getenv("CLAUDE_ROUTER_MODEL", DEFAULT_ROUTER_MODEL)
+    writer_model = (
+        os.getenv("CLAUDE_WRITER_MODEL")
+        or os.getenv("CLAUDE_MODEL")
+        or DEFAULT_WRITER_MODEL
+    )
 
     if should_smalltalk_fast(message, effective_history):
         router_payload = {
@@ -793,6 +804,10 @@ def chat(request: ChatRequest) -> ChatResponse:
         f"chat timings total={total_ms}ms router={router_ms}ms search={catalog_search_ms}ms "
         f"writer={writer_ms}ms router_used={router_used}"
     )
+    if router_used:
+        print(f"[LLM] router={router_model}, writer={writer_model}")
+    else:
+        print(f"[LLM] router=unused, writer={writer_model}")
 
     response = ChatResponse(reply=assistant_reply or "", mode=mode, conversation_id=conversation_id)
     if debug_enabled:
