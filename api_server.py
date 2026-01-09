@@ -30,7 +30,7 @@ from backend.telemetry import (
     append_jsonl,
     extract_urls_from_markdown,
 )
-from backend.llm import call_anthropic, call_anthropic_router
+from backend.llm import call_anthropic_router, call_anthropic_writer
 
 VERSION = "router-v2"
 
@@ -415,33 +415,72 @@ def parse_router_response(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def is_refinement_request(text: str) -> bool:
-    lowered = (text or "").lower()
-    refinement_phrases = [
-        "something",
-        "more",
-        "another",
-        "else",
-        "different",
-        "funnier",
-        "funny",
-        "darker",
-        "dark",
-        "calmer",
-        "calm",
-        "energetic",
-        "intense",
-        "like that",
-        "similar",
-    ]
-    return any(phrase in lowered for phrase in refinement_phrases)
-
-
-def get_anchor_from_history(history: List[Dict[str, str]]) -> str:
-    for item in reversed(history):
-        if item.get("role") == "user" and item.get("content"):
-            return item.get("content", "").strip()
+def _last_meaningful_user_message(history: List[Dict[str, str]]) -> str:
+    for item in reversed(history or []):
+        if item.get("role") == "user":
+            text = (item.get("content") or "").strip()
+            if text and len(text) >= 3:
+                if text.lower() not in {
+                    "why these recommendations?",
+                    "why these recommendations",
+                    "more",
+                    "more please",
+                }:
+                    return text
     return ""
+
+
+def _looks_like_refinement_only(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    vibe_words = [
+        "dark",
+        "darker",
+        "calm",
+        "calmer",
+        "funny",
+        "weird",
+        "strange",
+        "sad",
+        "happier",
+        "more like that",
+        "similar",
+        "another",
+        "faster",
+        "slower",
+        "sleepy",
+        "focus",
+        "study",
+        "more intense",
+        "more intimate",
+        "more dramatic",
+    ]
+    if any(word in lowered for word in vibe_words):
+        return True
+    if len(lowered) <= 14 and any(word in lowered for word in ["more", "again", "another", "different", "else"]):
+        return True
+    return False
+
+
+def _contains_anchor(text: str) -> bool:
+    lowered = (text or "").lower()
+    anchors = [
+        "bach",
+        "mozart",
+        "beethoven",
+        "chopin",
+        "mahler",
+        "piano",
+        "violin",
+        "cello",
+        "symphony",
+        "concerto",
+        "opera",
+        "quartet",
+        "requiem",
+        "orchestra",
+        "choral",
+    ]
+    return any(anchor in lowered for anchor in anchors)
 
 
 def build_effective_query(
@@ -454,17 +493,18 @@ def build_effective_query(
     query = (base_query or "").strip()
     if search_terms:
         query = f"{query} {' '.join(search_terms)}".strip()
-    if strategy in {"vibe", "continue"} and is_refinement_request(user_message):
-        anchor = get_anchor_from_history(history)
-        if anchor and anchor.lower() not in query.lower():
-            query = f"{query} {anchor}".strip()
+    if strategy in {"vibe", "continue"} and _looks_like_refinement_only(user_message):
+        if not _contains_anchor(user_message):
+            anchor = _last_meaningful_user_message(history)
+            if anchor and anchor.lower() not in query.lower():
+                query = f"{anchor} {query}".strip()
     return query or user_message.strip()
 
 
 def call_anthropic_env(
     system: str, messages: List[Dict[str, str]], model: Optional[str] = None
 ) -> str:
-    reply, error = call_anthropic(system, messages, model=model)
+    reply, error = call_anthropic_writer(system, messages, model=model)
     if error:
         raise HTTPException(status_code=500, detail=error)
     return reply or ""
@@ -490,7 +530,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     else:
         effective_history = get_history(conversation_id)
     is_new_chat = len(effective_history) == 0
-    is_first_turn = is_new_chat
+    is_first_turn = len(effective_history) == 0
     turn_index = get_turn_index(conversation_id) + 1
     log_dir = get_log_dir()
     jsonl_path = os.path.join(log_dir, "chat_events.jsonl")
