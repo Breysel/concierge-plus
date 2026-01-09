@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import time
 import traceback
 import uuid
@@ -31,6 +32,14 @@ from backend.telemetry import (
 )
 from backend.llm import call_anthropic_router
 
+VERSION = "router-v2"
+
+_CONV_LOCK = threading.Lock()
+_CONV_STORE: Dict[str, Dict[str, Any]] = {}
+_CONV_TTL_SEC = 24 * 3600
+_CONV_MAX_MSGS = 12
+_CONV_MAX_CONVS = 500
+
 
 class HistoryItem(BaseModel):
     role: str
@@ -61,8 +70,72 @@ app.add_middleware(
 
 
 @app.get("/health")
-def health() -> Dict[str, bool]:
-    return {"ok": True}
+def health() -> Dict[str, Any]:
+    return {"ok": True, "version": VERSION}
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _conv_gc() -> None:
+    now = _now()
+    dead = [
+        cid
+        for cid, v in _CONV_STORE.items()
+        if now - float(v.get("updated_at", 0)) > _CONV_TTL_SEC
+    ]
+    for cid in dead:
+        _CONV_STORE.pop(cid, None)
+    if len(_CONV_STORE) > _CONV_MAX_CONVS:
+        items = sorted(_CONV_STORE.items(), key=lambda kv: float(kv[1].get("updated_at", 0)))
+        for cid, _ in items[: max(0, len(_CONV_STORE) - _CONV_MAX_CONVS)]:
+            _CONV_STORE.pop(cid, None)
+
+
+def get_or_create_conversation(conversation_id: Optional[str]) -> str:
+    with _CONV_LOCK:
+        _conv_gc()
+        cid = conversation_id or str(uuid.uuid4())
+        if cid not in _CONV_STORE:
+            _CONV_STORE[cid] = {"history": [], "updated_at": _now(), "turn_index": 0}
+        return cid
+
+
+def set_history(cid: str, history: List[Dict[str, str]]) -> None:
+    clipped = history[-_CONV_MAX_MSGS:] if history else []
+    user_turns = sum(1 for item in clipped if item.get("role") == "user")
+    with _CONV_LOCK:
+        _CONV_STORE[cid] = {
+            "history": clipped,
+            "updated_at": _now(),
+            "turn_index": user_turns,
+        }
+
+
+def get_history(cid: str) -> List[Dict[str, str]]:
+    with _CONV_LOCK:
+        v = _CONV_STORE.get(cid) or {}
+        return list(v.get("history") or [])
+
+
+def append_turn(cid: str, role: str, content: str) -> None:
+    content = (content or "").strip()
+    if not content:
+        return
+    with _CONV_LOCK:
+        v = _CONV_STORE.setdefault(cid, {"history": [], "updated_at": _now(), "turn_index": 0})
+        v["history"].append({"role": role, "content": content})
+        v["history"] = v["history"][-_CONV_MAX_MSGS:]
+        v["updated_at"] = _now()
+        if role == "user":
+            v["turn_index"] = int(v.get("turn_index", 0)) + 1
+
+
+def get_turn_index(cid: str) -> int:
+    with _CONV_LOCK:
+        v = _CONV_STORE.get(cid) or {}
+        return int(v.get("turn_index", 0))
 
 
 def infer_filters(text: str) -> Dict[str, Any]:
@@ -104,7 +177,7 @@ def infer_mode_and_filters(text: str) -> Dict[str, Any]:
     }
 
 
-def should_smalltalk(text: str, history: List[HistoryItem]) -> bool:
+def should_smalltalk(text: str, history: List[Dict[str, str]]) -> bool:
     lowered = text.strip().lower()
     if not lowered:
         return False
@@ -135,8 +208,12 @@ def should_smalltalk(text: str, history: List[HistoryItem]) -> bool:
     return any(phrase in lowered for phrase in smalltalk_triggers)
 
 
-def build_history_summary(history: List[HistoryItem], current_message: str) -> str:
-    user_messages = [item.content for item in history if item.role == "user" and item.content]
+def build_history_summary(history: List[Dict[str, str]], current_message: str) -> str:
+    user_messages = [
+        item.get("content")
+        for item in history
+        if item.get("role") == "user" and item.get("content")
+    ]
     recent = user_messages[-2:]
     if not recent:
         return ""
@@ -145,12 +222,16 @@ def build_history_summary(history: List[HistoryItem], current_message: str) -> s
     return summary[:200]
 
 
-def build_conversation_context(history: List[HistoryItem]) -> str:
-    recent = history[-6:]
+def format_recent(
+    history: List[Dict[str, str]], max_msgs: int = 6, max_chars_each: int = 350
+) -> str:
+    recent = history[-max_msgs:] if history else []
     lines = []
     for item in recent:
-        if item.content:
-            lines.append(f"{item.role}: {item.content}")
+        role = (item.get("role") or "").upper()
+        content = (item.get("content") or "").strip().replace("\n", " ")
+        if content:
+            lines.append(f"{role}: {content[:max_chars_each]}")
     return "\n".join(lines)
 
 
@@ -175,6 +256,52 @@ def parse_router_response(text: str) -> Optional[Dict[str, Any]]:
         return json.loads(payload)
     except json.JSONDecodeError:
         return None
+
+
+def is_refinement_request(text: str) -> bool:
+    lowered = (text or "").lower()
+    refinement_phrases = [
+        "something",
+        "more",
+        "another",
+        "else",
+        "different",
+        "funnier",
+        "funny",
+        "darker",
+        "dark",
+        "calmer",
+        "calm",
+        "energetic",
+        "intense",
+        "like that",
+        "similar",
+    ]
+    return any(phrase in lowered for phrase in refinement_phrases)
+
+
+def get_anchor_from_history(history: List[Dict[str, str]]) -> str:
+    for item in reversed(history):
+        if item.get("role") == "user" and item.get("content"):
+            return item.get("content", "").strip()
+    return ""
+
+
+def build_effective_query(
+    base_query: str,
+    search_terms: List[str],
+    history: List[Dict[str, str]],
+    strategy: str,
+    user_message: str,
+) -> str:
+    query = (base_query or "").strip()
+    if search_terms:
+        query = f"{query} {' '.join(search_terms)}".strip()
+    if strategy in {"vibe", "continue"} and is_refinement_request(user_message):
+        anchor = get_anchor_from_history(history)
+        if anchor and anchor.lower() not in query.lower():
+            query = f"{query} {anchor}".strip()
+    return query or user_message.strip()
 
 
 def call_anthropic_env(
@@ -210,14 +337,21 @@ def chat(request: ChatRequest) -> ChatResponse:
     if not message:
         raise HTTPException(status_code=400, detail="Message is required.")
 
-    history = request.history or []
-    history = history[-12:]
+    request_history = request.history or []
     debug_enabled = os.getenv("DEBUG", "").lower() == "true"
 
-    conversation_id = request.conversation_id or str(uuid.uuid4())
+    conversation_id = get_or_create_conversation(request.conversation_id)
     request_id = str(uuid.uuid4())
-    is_new_chat = len(history) == 0
-    turn_index = 1 + sum(1 for item in history if item.role == "user")
+    if request_history:
+        effective_history = [
+            {"role": item.role, "content": item.content} for item in request_history
+        ]
+        set_history(conversation_id, effective_history)
+    else:
+        effective_history = get_history(conversation_id)
+    is_new_chat = len(effective_history) == 0
+    is_first_turn = is_new_chat
+    turn_index = get_turn_index(conversation_id) + 1
     log_dir = get_log_dir()
     jsonl_path = os.path.join(log_dir, "chat_events.jsonl")
     csv_path = os.path.join(log_dir, "chat_turns.csv")
@@ -236,20 +370,25 @@ def chat(request: ChatRequest) -> ChatResponse:
             },
         )
 
+    append_turn(conversation_id, "user", message)
+    history_for_context = get_history(conversation_id)
+
     mode = ""
     prompt_type = ""
     used_catalog = False
     candidate_count = 0
     top_candidates: List[Dict[str, Any]] = []
+    router_decision: Optional[Dict[str, Any]] = None
+    effective_search_query = ""
     system_prompt = ""
     user_prompt = ""
     assistant_reply = ""
     error_detail = None
     model_name = os.getenv("CLAUDE_MODEL", "claude-3-haiku-20240307")
-    conversation_context = build_conversation_context(history)
-    is_first_turn = len(history) == 0
+    conversation_context = format_recent(history_for_context)
 
     router_payload = None
+    router_raw_text = ""
     router_prompt = build_router_prompt(message, conversation_context=conversation_context)
     router_text, router_error = call_anthropic_router(
         ROUTER_RULES,
@@ -258,18 +397,25 @@ def chat(request: ChatRequest) -> ChatResponse:
         max_tokens=250,
     )
     if router_text and not router_error:
+        router_raw_text = router_text
         router_payload = parse_router_response(router_text)
 
     if not router_payload:
-        if should_smalltalk(message, history):
+        if should_smalltalk(message, effective_history):
             router_payload = {
                 "intent": "smalltalk",
                 "strategy": "gateway",
                 "query": message,
-                "filters": {},
                 "rank_by": "score_poplite",
-                "need_clarifying_question": False,
-                "clarifying_question": None,
+                "search_terms": [],
+                "filters": {
+                    "epochs": [],
+                    "genres": [],
+                    "exclude_genres": [],
+                    "soloist_instruments": [],
+                    "is_atmos": None,
+                    "min_unique_users": None,
+                },
             }
         else:
             mode_and_filters = infer_mode_and_filters(message)
@@ -277,22 +423,40 @@ def chat(request: ChatRequest) -> ChatResponse:
                 "intent": "reco",
                 "strategy": mode_and_filters["mode"],
                 "query": message,
-                "filters": mode_and_filters["filters"],
                 "rank_by": "score_poplite",
-                "need_clarifying_question": False,
-                "clarifying_question": None,
+                "search_terms": [],
+                "filters": {
+                    "epochs": mode_and_filters["filters"].get("epochs", []),
+                    "genres": mode_and_filters["filters"].get("genres", []),
+                    "exclude_genres": mode_and_filters["filters"].get("exclude_genres", []),
+                    "soloist_instruments": mode_and_filters["filters"].get(
+                        "soloist_instruments", []
+                    ),
+                    "is_atmos": mode_and_filters["filters"].get("is_atmos"),
+                    "min_unique_users": mode_and_filters["filters"].get("min_unique_users"),
+                },
             }
 
+    router_decision = router_payload
     intent = (router_payload.get("intent") or "reco").strip().lower()
     strategy = (router_payload.get("strategy") or "gateway").strip().lower()
     rank_by = (router_payload.get("rank_by") or "score_poplite").strip()
     query = (router_payload.get("query") or message).strip()
     router_filters = router_payload.get("filters") or {}
+    search_terms = router_payload.get("search_terms") or []
+
+    if router_filters.get("is_atmos") is False:
+        router_filters["is_atmos"] = None
+
+    heuristic_smalltalk = should_smalltalk(message, effective_history)
+    if intent == "smalltalk" and not heuristic_smalltalk:
+        intent = "reco"
 
     try:
         if intent == "smalltalk":
             prompt_type = "smalltalk"
             mode = "smalltalk"
+            effective_search_query = message
             prompt = build_smalltalk_prompt(
                 message,
                 conversation_context=conversation_context,
@@ -317,21 +481,24 @@ def chat(request: ChatRequest) -> ChatResponse:
                 search_filters["genres"] = router_filters.get("genres")
             if router_filters.get("exclude_genres"):
                 search_filters["exclude_genres"] = router_filters.get("exclude_genres")
-            instruments = router_filters.get("instruments") or router_filters.get(
-                "soloist_instruments"
-            )
+            instruments = router_filters.get("soloist_instruments")
             if instruments:
                 search_filters["soloist_instruments"] = instruments
             if router_filters.get("is_atmos") is True:
                 search_filters["is_atmos"] = True
-            if router_filters.get("is_atmos") is False:
-                search_filters["is_atmos"] = False
             if router_filters.get("min_unique_users") is not None:
                 search_filters["min_unique_users"] = router_filters.get("min_unique_users")
+            effective_search_query = build_effective_query(
+                query,
+                search_terms,
+                effective_history,
+                strategy,
+                message,
+            )
             try:
                 candidates = catalog.search(
                     {
-                        "query": query or message,
+                        "query": effective_search_query,
                         "mode": strategy,
                         "filters": search_filters,
                         "rank_by": rank_by,
@@ -360,7 +527,7 @@ def chat(request: ChatRequest) -> ChatResponse:
             ]
 
             if candidates:
-                history_summary = build_history_summary(history, message)
+                history_summary = build_history_summary(effective_history, message)
                 prompt = build_reco_prompt(
                     message,
                     candidates,
@@ -391,6 +558,10 @@ def chat(request: ChatRequest) -> ChatResponse:
                 "used_catalog": used_catalog,
                 "candidate_count": candidate_count,
                 "top_candidates": top_candidates,
+                "router_raw_text": truncate(router_raw_text),
+                "router_decision": router_decision,
+                "effective_search_query": effective_search_query,
+                "rank_by": rank_by,
                 "prompt_type": prompt_type,
                 "anthropic_model": model_name,
                 "system_prompt_sent_to_claude": truncate(system_prompt),
@@ -434,6 +605,9 @@ def chat(request: ChatRequest) -> ChatResponse:
             detail="Something went wrong while generating a response.",
         )
 
+    if assistant_reply:
+        append_turn(conversation_id, "assistant", assistant_reply)
+
     response = ChatResponse(reply=assistant_reply or "", mode=mode, conversation_id=conversation_id)
     if debug_enabled:
         response.debug = {
@@ -455,6 +629,10 @@ def chat(request: ChatRequest) -> ChatResponse:
             "used_catalog": used_catalog,
             "candidate_count": candidate_count,
             "top_candidates": top_candidates,
+            "router_raw_text": truncate(router_raw_text),
+            "router_decision": router_decision,
+            "effective_search_query": effective_search_query,
+            "rank_by": rank_by,
             "prompt_type": prompt_type,
             "anthropic_model": model_name,
             "system_prompt_sent_to_claude": truncate(system_prompt),

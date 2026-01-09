@@ -10,20 +10,19 @@ Decide intent + retrieval strategy based on the latest user message and recent c
 
 Output JSON schema (exact keys):
 {
-  "intent": "smalltalk" | "reco",
+  "intent": "reco" | "smalltalk",
   "strategy": "find" | "gateway" | "vibe" | "deep_dive" | "performer_led" | "atmos" | "continue",
-  "query": string,
-  "filters": {
-    "epochs": [string],
-    "genres": [string],
-    "exclude_genres": [string],
-    "instruments": [string],
-    "is_atmos": boolean,
-    "min_unique_users": number
-  },
+  "query": "string",
+  "search_terms": ["string", "..."],
   "rank_by": "score_poplite" | "score_hidden_gem" | "score_hidden_gem_strict" | "score_sticky" | "unique_users",
-  "need_clarifying_question": boolean,
-  "clarifying_question": string | null
+  "filters": {
+    "epochs": ["..."],
+    "genres": ["..."],
+    "exclude_genres": ["..."],
+    "soloist_instruments": ["..."],
+    "is_atmos": null | true,
+    "min_unique_users": null | number
+  }
 }
 
 Rules:
@@ -34,7 +33,10 @@ Rules:
 - if user references a known composer/artist => strategy="performer_led" or "find"
 - "continue" when user wants more like previous results
 - query should be a concise search string (can be the user message)
-- If no filters, return empty arrays and false/0 for filters fields.
+- If the user is refining (e.g., "something darker/funnier/more intense"), preserve anchors from recent conversation
+  by including them in query or search_terms.
+- Optional filters MUST be null unless explicitly requested; do NOT output is_atmos=false.
+- If no filters, return empty arrays and nulls.
 """.strip()
 
 RECO_RULES = """
@@ -47,6 +49,7 @@ Hard rules:
 - Do NOT output container_id anywhere.
 - Always use album_url for links when present. Never show container_id.
 - If album_url is missing, show a bold album title without a link and say nothing about the missing link.
+- Use album titles and artist names exactly as provided in the candidate data.
 - Do NOT output tag lists or field dumps.
 - Do NOT claim album-specific facts beyond the candidate data.
 - Do NOT mention duration or audio quality judgments.
@@ -101,12 +104,11 @@ Feedback: {one short feedback question}
 """.strip()
 
 
-def build_candidate_payload(candidates: List[Dict[str, Any]], limit: int = 30) -> str:
+def build_candidate_payload(candidates: List[Dict[str, Any]], limit: int = 20) -> str:
     compact = []
     for item in candidates[:limit]:
         compact.append(
             {
-                "container_id": item.get("container_id"),
                 "album_title": item.get("album_title"),
                 "album_url": item.get("album_url"),
                 "composers": item.get("composers"),
@@ -116,14 +118,9 @@ def build_candidate_payload(candidates: List[Dict[str, Any]], limit: int = 30) -
                 "primary_instrument": item.get("primary_instrument"),
                 "soloist_instruments": item.get("soloist_instruments"),
                 "is_atmos": bool(item.get("is_atmos", False)),
-                "audio_badges": item.get("audio_badges"),
-                "unique_users": item.get("unique_users"),
-                "score_poplite": item.get("score_poplite"),
-                "score_hidden_gem": item.get("score_hidden_gem"),
-                "score_sticky": item.get("score_sticky"),
             }
         )
-    return json.dumps(compact, ensure_ascii=True)
+    return json.dumps(compact, ensure_ascii=True, separators=(",", ":"))
 
 
 def build_reco_prompt(
