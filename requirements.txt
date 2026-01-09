@@ -2,7 +2,6 @@ streamlit
 pandas
 rapidfuzz
 python-dotenv
-openai
 anthropic
 fastapi
 uvicorn[standard]

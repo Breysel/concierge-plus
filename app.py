@@ -1,11 +1,17 @@
 import random
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import streamlit as st
 
 from backend import catalog
 from backend.llm import call_anthropic, call_anthropic_stream
-from backend.prompts import SYSTEM_PROMPT, build_reco_prompt, build_smalltalk_prompt
+from backend.prompts import SYSTEM_PROMPT, RECO_RULES, build_reco_prompt, build_smalltalk_prompt
+from backend.routing import (
+    build_effective_query,
+    format_recent,
+    route_message,
+    should_smalltalk,
+)
 
 SPINNER_MESSAGES = [
     "Flipping through the vinyl bins...",
@@ -43,128 +49,6 @@ def inject_stageplus_styles() -> None:
 
     with open("assets/stageplus.css", "r", encoding="utf-8") as handle:
         st.markdown(f"<style>{handle.read()}</style>", unsafe_allow_html=True)
-
-
-def infer_filters(text: str) -> Dict[str, Any]:
-    lowered = text.lower()
-
-    filters: Dict[str, Any] = {}
-
-    exclude_genres = []
-    if "no opera" in lowered or "without opera" in lowered:
-        exclude_genres.append("opera")
-    if any(x in lowered for x in ["no vocals", "no singing", "instrumental only", "no choir"]):
-        exclude_genres += ["opera", "vocal", "choral"]
-    if exclude_genres:
-        filters["exclude_genres"] = list(dict.fromkeys(exclude_genres))
-
-    instrument_words = {
-        "piano": "piano",
-        "violin": "violin",
-        "cello": "cello",
-        "clarinet": "clarinet",
-        "flute": "flute",
-        "organ": "organ",
-        "guitar": "guitar",
-        "trumpet": "trumpet",
-    }
-    requested_instruments = [v for k, v in instrument_words.items() if k in lowered]
-    if requested_instruments:
-        filters["soloist_instruments"] = requested_instruments
-
-    if any(x in lowered for x in ["atmos", "dolby", "spatial", "immersive"]):
-        filters["is_atmos"] = True
-    return filters
-
-
-def get_last_user_message(messages: List[Dict[str, Any]]) -> str:
-    for message in reversed(messages):
-        if message.get("role") == "user":
-            return message.get("content", "") or ""
-    return ""
-
-
-def is_vague_refinement(text: str) -> bool:
-    lowered = text.strip().lower()
-    if not lowered:
-        return False
-
-    tokens = lowered.split()
-    short_enough = len(tokens) <= 6
-    vague_markers = [
-        "dark",
-        "calm",
-        "relax",
-        "focus",
-        "energetic",
-        "dramatic",
-        "sleep",
-        "study",
-        "more",
-        "less",
-        "darker",
-        "lighter",
-    ]
-    has_vague = any(word in lowered for word in vague_markers)
-
-    anchor_markers = [
-        "by",
-        "composer",
-        "conductor",
-        "piano",
-        "violin",
-        "cello",
-        "mozart",
-        "beethoven",
-    ]
-    has_anchor = any(word in lowered for word in anchor_markers)
-
-    return (short_enough or has_vague) and not has_anchor
-
-
-def is_smalltalk(text: str) -> bool:
-    lowered = text.strip().lower()
-    if not lowered:
-        return True
-
-    greetings = ["hello", "hey", "hi", "hola", "guten tag", "hallo", "yo"]
-    thanks = ["thanks", "thank you", "thx", "appreciate it", "cheers"]
-    meta = ["who are you", "what can you do", "help", "how does this work"]
-
-    request_verbs = [
-        "recommend",
-        "suggest",
-        "give me",
-        "play",
-        "listen",
-        "looking for",
-        "in the mood",
-        "i want",
-        "i'm after",
-        "show me",
-        "something",
-        "anything",
-    ]
-    intent_words = [
-        "funny",
-        "calm",
-        "relaxing",
-        "dramatic",
-        "romantic",
-        "dark",
-        "uplifting",
-        "energ",
-        "sleep",
-        "study",
-        "focus",
-    ]
-
-    if any(phrase in lowered for phrase in greetings + thanks + meta):
-        if any(verb in lowered for verb in request_verbs + intent_words):
-            return False
-        return True
-
-    return False
 
 
 def format_album_title(item: Dict[str, Any]) -> str:
@@ -210,10 +94,14 @@ def build_offline_response(candidates: List[Dict[str, Any]], user_input: str) ->
     return "\n".join(lines).strip()
 
 
-def run_claude(prompt: str) -> str:
-    system = SYSTEM_PROMPT
+def run_claude(prompt: str, system: Optional[str] = None) -> str:
+    system = system or SYSTEM_PROMPT
     messages = [{"role": "user", "content": prompt}]
-    model = st.secrets.get("CLAUDE_MODEL", "claude-3-haiku-20240307")
+    model = (
+        st.secrets.get("CLAUDE_WRITER_MODEL")
+        or st.secrets.get("CLAUDE_MODEL")
+        or "claude-3-5-sonnet-20241022"
+    )
 
     chunks: List[str] = []
     try:
@@ -223,8 +111,8 @@ def run_claude(prompt: str) -> str:
             system=system,
             messages=messages,
             model=model,
-            temperature=0.2,
-            max_tokens=700,
+            temperature=0.3,
+            max_tokens=500,
         ):
             chunks.append(chunk)
             response_text = "".join(chunks)
@@ -239,8 +127,8 @@ def run_claude(prompt: str) -> str:
             system=system,
             messages=messages,
             model=model,
-            temperature=0.2,
-            max_tokens=700,
+            temperature=0.3,
+            max_tokens=500,
         )
         if error:
             st.error(error)
@@ -282,72 +170,100 @@ def main() -> None:
             else:
                 st.markdown(message["content"])
 
-    has_prior_user = any(
-        message.get("role") == "user" for message in st.session_state["messages"]
-    )
-
     user_input = st.chat_input("Ask for a classical recommendation...")
     if user_input:
+        prior_history = list(st.session_state["messages"])
+        has_prior_user = any(message.get("role") == "user" for message in prior_history)
+        is_first_turn = not has_prior_user
+
         st.session_state["messages"].append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        if is_smalltalk(user_input) and not has_prior_user:
-            prompt = build_smalltalk_prompt(user_input)
+        effective_history = prior_history + [{"role": "user", "content": user_input}]
+        conversation_context = format_recent(effective_history)
+        router_payload, _, _, _ = route_message(
+            user_input, effective_history, conversation_context=conversation_context
+        )
+        intent = (router_payload.get("intent") or "reco").strip().lower()
+
+        if intent == "smalltalk" and not should_smalltalk(user_input, effective_history):
+            intent = "reco"
+
+        if intent == "smalltalk":
+            prompt = build_smalltalk_prompt(
+                user_input,
+                conversation_context=conversation_context,
+                is_first_turn=is_first_turn,
+            )
             with st.chat_message("assistant"):
-                response_text = run_claude(prompt)
+                response_text = run_claude(prompt, system=SYSTEM_PROMPT)
             if response_text:
                 st.session_state["messages"].append({"role": "assistant", "content": response_text})
             st.markdown("</div>", unsafe_allow_html=True)
             return
 
-        filters = infer_filters(user_input)
-
         with st.spinner(random.choice(SPINNER_MESSAGES)):
-            candidates1 = catalog.search(
-                {
-                    "query": user_input,
-                    "mode": "auto",
-                    "filters": filters,
-                    "limit": 30,
-                }
-            )
+            strategy = (router_payload.get("strategy") or "gateway").strip().lower()
+            rank_by = (router_payload.get("rank_by") or "score_poplite").strip()
+            query = (router_payload.get("query") or user_input).strip()
+            router_filters = router_payload.get("filters") or {}
+            search_terms = router_payload.get("search_terms") or []
 
-            last_user = get_last_user_message(st.session_state["messages"][:-1])
-            if last_user and is_vague_refinement(user_input):
-                candidates2 = catalog.search(
+            search_filters: Dict[str, Any] = {}
+            if router_filters.get("epochs"):
+                search_filters["epochs"] = router_filters.get("epochs")
+            if router_filters.get("genres"):
+                search_filters["genres"] = router_filters.get("genres")
+            if router_filters.get("exclude_genres"):
+                search_filters["exclude_genres"] = router_filters.get("exclude_genres")
+            instruments = router_filters.get("soloist_instruments")
+            if instruments:
+                search_filters["soloist_instruments"] = instruments
+            if router_filters.get("is_atmos") is True:
+                search_filters["is_atmos"] = True
+            if router_filters.get("min_unique_users") is not None:
+                search_filters["min_unique_users"] = router_filters.get("min_unique_users")
+
+            effective_query = build_effective_query(
+                query,
+                search_terms,
+                effective_history,
+                strategy,
+                user_input,
+            )
+            try:
+                candidates = catalog.search(
                     {
-                        "query": last_user,
-                        "mode": "find",
-                        "filters": {},
-                        "limit": 20,
+                        "query": effective_query,
+                        "mode": strategy,
+                        "filters": search_filters,
+                        "rank_by": rank_by,
+                        "limit": 12,
                     }
                 )
-                seen = set()
-                merged = []
-                for item in candidates1 + candidates2:
-                    cid = item.get("container_id")
-                    if cid in seen:
-                        continue
-                    seen.add(cid)
-                    merged.append(item)
-                candidates = merged
-            else:
-                candidates = candidates1
-
-        prev_assistant = ""
-        for message in reversed(st.session_state["messages"][:-1]):
-            if message["role"] == "assistant":
-                prev_assistant = message["content"]
-                break
+            except FileNotFoundError:
+                response_text = (
+                    "I'm having trouble accessing the music library right now. "
+                    "Try again in a moment?"
+                )
+                with st.chat_message("assistant"):
+                    st.markdown(response_text)
+                st.session_state["messages"].append(
+                    {"role": "assistant", "content": response_text}
+                )
+                st.markdown("</div>", unsafe_allow_html=True)
+                return
 
         prompt = build_reco_prompt(
             user_input,
             candidates,
-            conversation_context=prev_assistant,
+            strategy=strategy,
+            rank_by=rank_by,
+            conversation_context=conversation_context,
         )
         with st.chat_message("assistant"):
-            response_text = run_claude(prompt)
+            response_text = run_claude(prompt, system=f"{SYSTEM_PROMPT}\n\n{RECO_RULES}")
             if not response_text:
                 response_text = build_offline_response(candidates, user_input)
                 st.markdown(response_text, unsafe_allow_html=True)

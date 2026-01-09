@@ -110,6 +110,19 @@ def ensure_catalog_downloaded(path: str) -> str:
     return resolved
 
 
+def is_catalog_loaded() -> bool:
+    return load_catalog.cache_info().currsize > 0
+
+
+__all__ = [
+    "search",
+    "load_catalog",
+    "ensure_catalog_downloaded",
+    "get_catalog_local_path",
+    "is_catalog_loaded",
+]
+
+
 def _normalize_album_url(value: str) -> str:
     if not value:
         return ""

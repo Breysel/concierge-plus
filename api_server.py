@@ -1,4 +1,3 @@
-import json
 import os
 import threading
 import time
@@ -16,11 +15,9 @@ from backend import catalog
 from backend.prompts import (
     SYSTEM_PROMPT,
     RECO_RULES,
-    ROUTER_RULES,
     SMALLTALK_RULES_FIRST_TURN,
     SMALLTALK_RULES_ONGOING,
     build_reco_prompt,
-    build_router_prompt,
     build_smalltalk_prompt,
 )
 from backend.telemetry import (
@@ -30,14 +27,16 @@ from backend.telemetry import (
     append_jsonl,
     extract_urls_from_markdown,
 )
-from backend.llm import (
-    call_anthropic_router,
-    call_anthropic_writer,
-    DEFAULT_ROUTER_MODEL,
-    DEFAULT_WRITER_MODEL,
+from backend.llm import call_anthropic_writer, DEFAULT_ROUTER_MODEL, DEFAULT_WRITER_MODEL
+from backend.routing import (
+    build_effective_query,
+    format_recent,
+    route_message,
+    should_smalltalk,
 )
 
 VERSION = "router-v2"
+_START_TIME = time.time()
 
 _CONV_LOCK = threading.Lock()
 _CONV_STORE: Dict[str, Dict[str, Any]] = {}
@@ -77,7 +76,12 @@ app.add_middleware(
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    return {"ok": True, "version": VERSION}
+    return {
+        "ok": True,
+        "version": VERSION,
+        "catalog_loaded": catalog.is_catalog_loaded(),
+        "uptime_seconds": int(time.time() - _START_TIME),
+    }
 
 
 @app.on_event("startup")
@@ -101,23 +105,26 @@ def _now() -> float:
 
 
 def _conv_gc() -> None:
-    now = _now()
-    dead = [
-        cid
-        for cid, v in _CONV_STORE.items()
-        if now - float(v.get("updated_at", 0)) > _CONV_TTL_SEC
-    ]
-    for cid in dead:
-        _CONV_STORE.pop(cid, None)
-    if len(_CONV_STORE) > _CONV_MAX_CONVS:
-        items = sorted(_CONV_STORE.items(), key=lambda kv: float(kv[1].get("updated_at", 0)))
-        for cid, _ in items[: max(0, len(_CONV_STORE) - _CONV_MAX_CONVS)]:
+    with _CONV_LOCK:
+        now = _now()
+        dead = [
+            cid
+            for cid, v in _CONV_STORE.items()
+            if now - float(v.get("updated_at", 0)) > _CONV_TTL_SEC
+        ]
+        for cid in dead:
             _CONV_STORE.pop(cid, None)
+        if len(_CONV_STORE) > _CONV_MAX_CONVS:
+            items = sorted(
+                _CONV_STORE.items(), key=lambda kv: float(kv[1].get("updated_at", 0))
+            )
+            for cid, _ in items[: max(0, len(_CONV_STORE) - _CONV_MAX_CONVS)]:
+                _CONV_STORE.pop(cid, None)
 
 
 def get_or_create_conversation(conversation_id: Optional[str]) -> str:
+    _conv_gc()
     with _CONV_LOCK:
-        _conv_gc()
         cid = conversation_id or str(uuid.uuid4())
         if cid not in _CONV_STORE:
             _CONV_STORE[cid] = {"history": [], "updated_at": _now(), "turn_index": 0}
@@ -160,216 +167,6 @@ def get_turn_index(cid: str) -> int:
         return int(v.get("turn_index", 0))
 
 
-def infer_filters(text: str) -> Dict[str, Any]:
-    lowered = text.lower()
-
-    filters: Dict[str, Any] = {}
-
-    exclude_genres = []
-    if "no opera" in lowered or "without opera" in lowered:
-        exclude_genres.append("opera")
-    if any(x in lowered for x in ["no vocals", "no singing", "instrumental only", "no choir"]):
-        exclude_genres += ["opera", "vocal", "choral"]
-    if exclude_genres:
-        filters["exclude_genres"] = list(dict.fromkeys(exclude_genres))
-
-    instrument_words = {
-        "piano": "piano",
-        "violin": "violin",
-        "cello": "cello",
-        "clarinet": "clarinet",
-        "flute": "flute",
-        "organ": "organ",
-        "guitar": "guitar",
-        "trumpet": "trumpet",
-    }
-    requested_instruments = [v for k, v in instrument_words.items() if k in lowered]
-    if requested_instruments:
-        filters["soloist_instruments"] = requested_instruments
-
-    if any(x in lowered for x in ["atmos", "dolby", "spatial", "immersive"]):
-        filters["is_atmos"] = True
-    return filters
-
-
-def infer_mode_and_filters(text: str) -> Dict[str, Any]:
-    return {
-        "mode": "auto",
-        "filters": infer_filters(text),
-    }
-
-
-def should_smalltalk(text: str, history: List[Dict[str, str]]) -> bool:
-    lowered = text.strip().lower()
-    if not lowered:
-        return False
-
-    smalltalk_triggers = [
-        "hi",
-        "hello",
-        "hey",
-        "thanks",
-        "thank you",
-        "help",
-        "what can you do",
-        "who are you",
-    ]
-    reco_intent = [
-        "something funny",
-        "something dark",
-        "something calm",
-        "recommend",
-        "give me",
-        "music for",
-        "suggest",
-    ]
-
-    if any(phrase in lowered for phrase in reco_intent):
-        return False
-
-    return any(phrase in lowered for phrase in smalltalk_triggers)
-
-
-def should_smalltalk_fast(message: str, history: List[Dict[str, str]]) -> bool:
-    lowered = (message or "").strip().lower()
-    if not lowered:
-        return False
-    smalltalk_only = [
-        "hello",
-        "hi",
-        "hey",
-        "thanks",
-        "thx",
-        "who are you",
-        "help",
-        "what can you do",
-    ]
-    reco_intent = [
-        "something funny",
-        "something dark",
-        "something calm",
-        "give me",
-        "recommend",
-        "music for",
-        "make it",
-        "bach",
-        "mozart",
-        "beethoven",
-    ]
-    if any(phrase in lowered for phrase in reco_intent):
-        return False
-    return any(phrase in lowered for phrase in smalltalk_only)
-
-
-def should_use_router(message: str, history: List[Dict[str, str]]) -> bool:
-    lowered = (message or "").strip().lower()
-    if not lowered:
-        return False
-    if should_smalltalk_fast(message, history):
-        return False
-
-    anchors = [
-        "bach",
-        "mozart",
-        "beethoven",
-        "chopin",
-        "mahler",
-        "piano",
-        "violin",
-        "cello",
-        "symphony",
-        "concerto",
-        "opera",
-        "quartet",
-        "requiem",
-        "orchestra",
-        "choral",
-    ]
-    explicit_modes = [
-        "atmos",
-        "dolby",
-        "spatial",
-        "hidden gem",
-        "deep dive",
-        "obscure",
-        "underrated",
-        "study",
-        "focus",
-        "sleep",
-        "relax",
-        "calm",
-        "dark",
-        "funny",
-        "energ",
-    ]
-    refinement_phrases = [
-        "darker",
-        "calmer",
-        "funnier",
-        "more like that",
-        "similar",
-        "another",
-        "continue",
-        "less opera",
-        "no vocals",
-    ]
-
-    if len(history) == 0 and len(lowered.split()) <= 6 and any(a in lowered for a in anchors):
-        return False
-    if any(m in lowered for m in explicit_modes):
-        return False
-    if len(history) > 0 and len(lowered.split()) <= 5 and any(p in lowered for p in refinement_phrases):
-        return True
-    return False
-
-
-def fast_route(message: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
-    lowered = (message or "").strip().lower()
-    filters = {
-        "epochs": [],
-        "genres": [],
-        "exclude_genres": [],
-        "soloist_instruments": [],
-        "is_atmos": None,
-        "min_unique_users": None,
-    }
-    strategy = "gateway"
-    rank_by = "score_poplite"
-
-    if any(x in lowered for x in ["atmos", "dolby", "spatial"]):
-        strategy = "atmos"
-        filters["is_atmos"] = True
-        rank_by = "score_poplite"
-    elif any(x in lowered for x in ["hidden gem", "deep dive", "obscure", "underrated"]):
-        strategy = "deep_dive"
-        rank_by = "score_hidden_gem"
-        filters["min_unique_users"] = 0
-    elif any(x in lowered for x in ["study", "focus", "sleep", "relax", "calm", "dark", "funny", "energ"]):
-        strategy = "vibe"
-        rank_by = "score_sticky"
-    elif any(
-        x in lowered for x in ["bach", "mozart", "beethoven", "chopin", "mahler", "tchaikovsky"]
-    ):
-        strategy = "performer_led"
-        rank_by = "score_poplite"
-
-    if "no opera" in lowered or "without opera" in lowered:
-        filters["exclude_genres"] = ["opera"]
-    if any(x in lowered for x in ["no vocals", "no singing", "instrumental only", "no choir"]):
-        filters["exclude_genres"] = list(
-            dict.fromkeys(filters["exclude_genres"] + ["opera", "vocal", "choral"])
-        )
-
-    return {
-        "intent": "reco",
-        "strategy": strategy,
-        "query": message,
-        "search_terms": [],
-        "rank_by": rank_by,
-        "filters": filters,
-    }
-
-
 def build_history_summary(history: List[Dict[str, str]], current_message: str) -> str:
     user_messages = [
         item.get("content")
@@ -382,128 +179,6 @@ def build_history_summary(history: List[Dict[str, str]], current_message: str) -
     previous = "; ".join(recent)
     summary = f"User previously asked: {previous}. Now asks: {current_message}."
     return summary[:200]
-
-
-def format_recent(
-    history: List[Dict[str, str]], max_msgs: int = 6, max_chars_each: int = 350
-) -> str:
-    recent = history[-max_msgs:] if history else []
-    lines = []
-    for item in recent:
-        role = (item.get("role") or "").upper()
-        content = (item.get("content") or "").strip().replace("\n", " ")
-        if content:
-            lines.append(f"{role}: {content[:max_chars_each]}")
-    return "\n".join(lines)
-
-
-def _extract_json_object(text: str) -> Optional[str]:
-    if not text:
-        return None
-    text = text.strip()
-    if text.startswith("{") and text.endswith("}"):
-        return text
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        return text[start : end + 1]
-    return None
-
-
-def parse_router_response(text: str) -> Optional[Dict[str, Any]]:
-    payload = _extract_json_object(text)
-    if not payload:
-        return None
-    try:
-        return json.loads(payload)
-    except json.JSONDecodeError:
-        return None
-
-
-def _last_meaningful_user_message(history: List[Dict[str, str]]) -> str:
-    for item in reversed(history or []):
-        if item.get("role") == "user":
-            text = (item.get("content") or "").strip()
-            if text and len(text) >= 3:
-                if text.lower() not in {
-                    "why these recommendations?",
-                    "why these recommendations",
-                    "more",
-                    "more please",
-                }:
-                    return text
-    return ""
-
-
-def _looks_like_refinement_only(text: str) -> bool:
-    lowered = (text or "").strip().lower()
-    vibe_words = [
-        "dark",
-        "darker",
-        "calm",
-        "calmer",
-        "funny",
-        "weird",
-        "strange",
-        "sad",
-        "happier",
-        "more like that",
-        "similar",
-        "another",
-        "faster",
-        "slower",
-        "sleepy",
-        "focus",
-        "study",
-        "more intense",
-        "more intimate",
-        "more dramatic",
-    ]
-    if any(word in lowered for word in vibe_words):
-        return True
-    if len(lowered) <= 14 and any(word in lowered for word in ["more", "again", "another", "different", "else"]):
-        return True
-    return False
-
-
-def _contains_anchor(text: str) -> bool:
-    lowered = (text or "").lower()
-    anchors = [
-        "bach",
-        "mozart",
-        "beethoven",
-        "chopin",
-        "mahler",
-        "piano",
-        "violin",
-        "cello",
-        "symphony",
-        "concerto",
-        "opera",
-        "quartet",
-        "requiem",
-        "orchestra",
-        "choral",
-    ]
-    return any(anchor in lowered for anchor in anchors)
-
-
-def build_effective_query(
-    base_query: str,
-    search_terms: List[str],
-    history: List[Dict[str, str]],
-    strategy: str,
-    user_message: str,
-) -> str:
-    query = (base_query or "").strip()
-    if search_terms:
-        query = f"{query} {' '.join(search_terms)}".strip()
-    if strategy in {"vibe", "continue"} and _looks_like_refinement_only(user_message):
-        if not _contains_anchor(user_message):
-            anchor = _last_meaningful_user_message(history)
-            if anchor and anchor.lower() not in query.lower():
-                query = f"{anchor} {query}".strip()
-    return query or user_message.strip()
 
 
 def call_anthropic_env(
@@ -571,52 +246,17 @@ def chat(request: ChatRequest) -> ChatResponse:
     user_prompt = ""
     assistant_reply = ""
     error_detail = None
-    model_name = os.getenv("CLAUDE_MODEL", "claude-3-haiku-20240307")
+    model_name = os.getenv("CLAUDE_WRITER_MODEL") or os.getenv("CLAUDE_MODEL") or DEFAULT_WRITER_MODEL
     conversation_context = format_recent(history_for_context)
 
-    router_payload = None
-    router_raw_text = ""
-    router_used = False
-    router_ms = 0
     router_model = os.getenv("CLAUDE_ROUTER_MODEL", DEFAULT_ROUTER_MODEL)
-    writer_model = (
-        os.getenv("CLAUDE_WRITER_MODEL")
-        or os.getenv("CLAUDE_MODEL")
-        or DEFAULT_WRITER_MODEL
+    writer_model = model_name
+
+    router_payload, router_raw_text, router_used, router_ms = route_message(
+        message,
+        effective_history,
+        conversation_context=conversation_context,
     )
-
-    if should_smalltalk_fast(message, effective_history):
-        router_payload = {
-            "intent": "smalltalk",
-            "strategy": "gateway",
-            "query": message,
-            "rank_by": "score_poplite",
-            "search_terms": [],
-            "filters": {
-                "epochs": [],
-                "genres": [],
-                "exclude_genres": [],
-                "soloist_instruments": [],
-                "is_atmos": None,
-                "min_unique_users": None,
-            },
-        }
-    else:
-        if should_use_router(message, effective_history):
-            router_used = True
-            router_prompt = build_router_prompt(message, conversation_context=conversation_context)
-            router_start = time.perf_counter()
-            router_text, router_error = call_anthropic_router(
-                ROUTER_RULES,
-                [{"role": "user", "content": router_prompt}],
-            )
-            router_ms = int((time.perf_counter() - router_start) * 1000)
-            if router_text and not router_error:
-                router_raw_text = router_text
-                router_payload = parse_router_response(router_text)
-
-        if not router_payload:
-            router_payload = fast_route(message, effective_history)
 
     router_decision = router_payload
     intent = (router_payload.get("intent") or "reco").strip().lower()
@@ -686,13 +326,13 @@ def chat(request: ChatRequest) -> ChatResponse:
                         "mode": strategy,
                         "filters": search_filters,
                         "rank_by": rank_by,
-                        "limit": 30,
+                        "limit": 12,
                     }
                 )
             except FileNotFoundError:
                 assistant_reply = (
-                    "Catalog isn't loaded on this server yet — I can still chat, but "
-                    "can't recommend albums until the catalog is connected."
+                    "I'm having trouble accessing the music library right now. "
+                    "Try again in a moment?"
                 )
                 candidates = []
             catalog_search_ms = int((time.perf_counter() - search_start) * 1000)
