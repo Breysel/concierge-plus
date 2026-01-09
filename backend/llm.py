@@ -3,8 +3,8 @@ from functools import lru_cache
 from typing import List, Dict, Optional, Tuple, Generator
 
 
-DEFAULT_ROUTER_MODEL = "claude-3-5-haiku-20241022"
-DEFAULT_WRITER_MODEL = "claude-3-5-sonnet-20241022"
+DEFAULT_ROUTER_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_WRITER_MODEL = "claude-sonnet-4-5-20250929"
 
 
 def get_secret(name: str) -> Optional[str]:
