@@ -44,7 +44,7 @@ def call_anthropic(
         return None, "Missing ANTHROPIC_API_KEY"
 
     try:
-        resolved_model = model or os.getenv("CLAUDE_MODEL", DEFAULT_WRITER_MODEL)
+        resolved_model = model or DEFAULT_WRITER_MODEL
         resolved_temp = (
             temperature if temperature is not None else float(os.getenv("CLAUDE_TEMPERATURE", "0.3"))
         )
@@ -82,12 +82,7 @@ def call_anthropic_writer(
         return None, "Missing ANTHROPIC_API_KEY"
 
     try:
-        resolved_model = (
-            model
-            or os.getenv("CLAUDE_WRITER_MODEL")
-            or os.getenv("CLAUDE_MODEL")
-            or DEFAULT_WRITER_MODEL
-        )
+        resolved_model = model or DEFAULT_WRITER_MODEL
         resolved_temp = (
             temperature if temperature is not None else float(os.getenv("CLAUDE_TEMPERATURE", "0.3"))
         )
@@ -164,7 +159,7 @@ def call_anthropic_router(
         return None, "Missing ANTHROPIC_API_KEY"
 
     try:
-        resolved_model = model or os.getenv("CLAUDE_ROUTER_MODEL", DEFAULT_ROUTER_MODEL)
+        resolved_model = model or DEFAULT_ROUTER_MODEL
         resolved_temp = 0.0 if temperature is None else float(temperature)
         resolved_max_tokens = int(os.getenv("CLAUDE_ROUTER_MAX_TOKENS", "200"))
         if max_tokens is not None:

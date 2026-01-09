@@ -246,11 +246,11 @@ def chat(request: ChatRequest) -> ChatResponse:
     user_prompt = ""
     assistant_reply = ""
     error_detail = None
-    model_name = os.getenv("CLAUDE_WRITER_MODEL") or os.getenv("CLAUDE_MODEL") or DEFAULT_WRITER_MODEL
+    model_name = DEFAULT_WRITER_MODEL
     conversation_context = format_recent(history_for_context)
 
-    router_model = os.getenv("CLAUDE_ROUTER_MODEL", DEFAULT_ROUTER_MODEL)
-    writer_model = model_name
+    router_model = DEFAULT_ROUTER_MODEL
+    writer_model = DEFAULT_WRITER_MODEL
 
     router_payload, router_raw_text, router_used, router_ms = route_message(
         message,

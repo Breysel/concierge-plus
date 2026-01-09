@@ -69,17 +69,14 @@ Render Disk is mounted at an absolute path (example: `/var/data`). Suggested env
 - `CATALOG_CSV_PATH` (URL or local path)
 - `CATALOG_CACHE_DIR=/var/data`
 - `CONCIERGE_LOG_DIR=/var/data/concierge_plus_logs`
-- `CLAUDE_MODEL` (fallback)
-- `CLAUDE_ROUTER_MODEL` (recommended: Haiku)
-- `CLAUDE_WRITER_MODEL` (recommended: Sonnet)
 - `CLAUDE_MAX_TOKENS`, `CLAUDE_TEMPERATURE`
 - `PRELOAD_CATALOG=1` (default)
 
-## Model configuration (optional)
+## Model configuration
 
-- `CLAUDE_ROUTER_MODEL` (default: `claude-3-5-haiku-20241022`)
-- `CLAUDE_WRITER_MODEL` (default: `claude-3-5-sonnet-20241022`)
-These are not secrets and may be set via environment variables.
+Defaults are hardcoded in `backend/llm.py`:
+- Router: `claude-haiku-4-5-20251001`
+- Writer: `claude-sonnet-4-5-20250929`
 
 ## Sanity checks (manual)
 
