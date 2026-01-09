@@ -371,6 +371,7 @@ def chat(request: ChatRequest) -> ChatResponse:
                 writer_ms = int((time.perf_counter() - writer_start) * 1000)
     except Exception as exc:
         error_detail = f"{exc.__class__.__name__}: {exc}\n{traceback.format_exc(limit=5)}"
+        print(f"🔴 ERROR in /chat: {error_detail}")
         latency_ms = int((time.perf_counter() - start_time) * 1000)
         append_jsonl(
             jsonl_path,
