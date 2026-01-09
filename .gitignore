@@ -7,3 +7,10 @@ __pycache__/
 data/catalog.csv
 data/*.csv
 *.csv
+
+# Logs
+*.jsonl
+logs/
+
+# Local catalog
+catalog.csv

@@ -1,114 +1,103 @@
-# Stage+ Classical Concierge MVP
+# Stage+ Classical Concierge API
 
-A Streamlit app that recommends 3 Stage+ albums from a local CSV catalog. The catalog is the only source of truth, and the optional LLM is used only for narration.
+A FastAPI backend that recommends classical music albums from a Stage+ catalog using Claude for natural language narration.
 
-## Local Run
-
+## Quick Start
 ```bash
+# Install dependencies
 pip install -r requirements.txt
-streamlit run app.py
+
+# Set environment variables
+export ANTHROPIC_API_KEY="sk-ant-..."
+export CATALOG_CSV_PATH="https://drive.google.com/uc?export=download&id=..."
+
+# Run the server
+uvicorn api_server:app --host 0.0.0.0 --port 8000
 ```
 
-## Streamlit Community Cloud Deploy
+## API Endpoints
 
-1. Push this repo to GitHub.
-2. Go to https://share.streamlit.io and deploy the repo.
-3. In app settings, add secrets (do not commit secrets):
-   - `ANTHROPIC_API_KEY`
-   - `CATALOG_CSV_PATH` (local file path or URL)
-4. Set access to private if needed, then invite viewers from the app settings.
+### POST /chat
 
-## API Usage
-
-Run the FastAPI server:
-
+Send a message and get album recommendations.
 ```bash
-uvicorn api_server:app --host 0.0.0.0 --port $PORT
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Bach, something dark"}'
 ```
 
-Example request:
-
-```bash
-curl -X POST http://127.0.0.1:8000/chat \\
-  -H "Content-Type: application/json" \\
-  -d '{"message":"bach, something dark","history":[]}'
+**Request body:**
+```json
+{
+  "message": "string (required)",
+  "conversation_id": "string (optional, for multi-turn)",
+  "history": [{"role": "user", "content": "..."}],
+  "debug": false
+}
 ```
 
-## Frontend integration (Lovable)
-
-Send a POST to `/chat` with a message and optional history. The reply is markdown.
-
-```bash
-curl -X POST http://127.0.0.1:8000/chat \\
-  -H "Content-Type: application/json" \\
-  -d '{"message":"Bach, but something dark","history":[{"role":"user","content":"Bach"}]}'
+**Response:**
+```json
+{
+  "reply": "markdown string with recommendations",
+  "mode": "reco | smalltalk",
+  "conversation_id": "uuid"
+}
 ```
 
-## Replace the Catalog
+### GET /health
 
-Set `CATALOG_CSV_PATH` to a local CSV path or a direct-download URL. The app reads it at startup and caches it.
-
-Example URL:
-
+Check service status.
+```json
+{
+  "ok": true,
+  "version": "router-v2",
+  "catalog_loaded": true,
+  "uptime_seconds": 123
+}
 ```
 
-## Logging (Render-friendly)
+## Environment Variables
 
-Set `CONCIERGE_LOG_DIR` to control where chat logs are written (default: `/tmp/concierge_plus_logs`).
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | Yes | - | Anthropic API key |
+| `CATALOG_CSV_PATH` | Yes | - | URL or local path to catalog CSV |
+| `CATALOG_CACHE_DIR` | No | `/tmp` | Where to cache downloaded catalog |
+| `CONCIERGE_LOG_DIR` | No | `/tmp/concierge_plus_logs` | Log directory |
+| `CLAUDE_TEMPERATURE` | No | `0.3` | LLM temperature |
+| `CLAUDE_MAX_TOKENS` | No | `500` | Max response tokens |
 
-Admin export endpoints (optional):
-- `GET /admin/logs/chat_events.jsonl`
-- `GET /admin/logs/chat_turns.csv`
+## Deployment (Render)
 
-To enable, set `ADMIN_TOKEN` and pass header `X-Admin-Token: <token>`. If `ADMIN_TOKEN` is not set, the endpoints return 404. Logs are ephemeral on Render free tier and reset on redeploy.
+1. Create a new Web Service on Render
+2. Set environment variables in Render dashboard
+3. Deploy from GitHub
 
-## Render Disk (persistent cache/logs)
-
-Render Disk is mounted at an absolute path (example: `/var/data`). Suggested env vars:
-- `ANTHROPIC_API_KEY`
-- `CATALOG_CSV_PATH` (URL or local path)
-- `CATALOG_CACHE_DIR=/var/data`
-- `CONCIERGE_LOG_DIR=/var/data/concierge_plus_logs`
-- `CLAUDE_MAX_TOKENS`, `CLAUDE_TEMPERATURE`
-- `PRELOAD_CATALOG=1` (default)
-
-## Model configuration
-
-Defaults are hardcoded in `backend/llm.py`:
-- Router: `claude-haiku-4-5-20251001`
-- Writer: `claude-sonnet-4-5-20250929`
-
-## Sanity checks (manual)
-
-- `/health` returns `version: router-v2` after deploy.
-- `/chat` with "hello" mid-chat stays short (no onboarding bullets).
-- `/chat` with "give me bach" then "something funny" keeps the Bach anchor.
-https://drive.google.com/uc?export=download&id=1wR_FcZMJeDVtKM_hGVNNDuUIOgoGvg-D
-```
-
-## Security Notes
-
-- This repo is public: do not commit catalog files or secrets.
-- Never commit API keys.
-- Use `.streamlit/secrets.toml` locally or secrets in Streamlit Cloud.
+**Recommended Render settings:**
+- Build command: `pip install -r requirements.txt`
+- Start command: `uvicorn api_server:app --host 0.0.0.0 --port $PORT`
 
 ## Project Structure
-
 ```
 .
-|-- app.py
-|-- backend/
-|   |-- __init__.py
-|   |-- catalog.py
-|   |-- ranking.py
-|   |-- llm.py
-|   `-- prompts.py
-|-- data/
-|   `-- catalog.csv
-|-- .streamlit/
-|   |-- config.toml
-|   `-- secrets.toml.example
-|-- .gitignore
-|-- requirements.txt
-`-- README.md
+├── api_server.py          # FastAPI application
+├── backend/
+│   ├── catalog.py         # Catalog loading and search
+│   ├── filters.py         # Query filter extraction
+│   ├── llm.py             # Anthropic API calls
+│   ├── prompts.py         # System prompts and templates
+│   ├── ranking.py         # Scoring strategies
+│   ├── routing.py         # Intent routing logic
+│   └── telemetry.py       # Logging utilities
+├── requirements.txt
+└── README.md
+```
+
+## Admin Endpoints (optional)
+
+Set `ADMIN_TOKEN` to enable log exports:
+```bash
+curl -H "X-Admin-Token: your-token" \
+  https://your-app.onrender.com/admin/logs/chat_turns.csv
 ```

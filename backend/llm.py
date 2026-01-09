@@ -8,15 +8,7 @@ DEFAULT_WRITER_MODEL = "claude-sonnet-4-5-20250929"
 
 
 def get_secret(name: str) -> Optional[str]:
-    value = os.getenv(name)
-    if value:
-        return value
-    try:
-        import streamlit as st
-
-        return st.secrets.get(name)
-    except Exception:
-        return None
+    return os.getenv(name)
 
 
 def _get_anthropic_api_key() -> Optional[str]:
