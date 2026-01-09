@@ -62,6 +62,17 @@ Admin export endpoints (optional):
 
 To enable, set `ADMIN_TOKEN` and pass header `X-Admin-Token: <token>`. If `ADMIN_TOKEN` is not set, the endpoints return 404. Logs are ephemeral on Render free tier and reset on redeploy.
 
+## Render Disk (persistent cache/logs)
+
+Render Disk is mounted at an absolute path (example: `/var/data`). Suggested env vars:
+- `ANTHROPIC_API_KEY`
+- `CATALOG_CSV_PATH` (URL or local path)
+- `CATALOG_CACHE_DIR=/var/data`
+- `CONCIERGE_LOG_DIR=/var/data/concierge_plus_logs`
+- `CLAUDE_MODEL`
+- `CLAUDE_ROUTER_MODEL`
+- `PRELOAD_CATALOG=1` (default)
+
 ## Sanity checks (manual)
 
 - `/health` returns `version: router-v2` after deploy.

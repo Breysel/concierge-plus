@@ -9,7 +9,12 @@ _LOG_LOCK = Lock()
 
 
 def get_log_dir() -> str:
-    return os.getenv("CONCIERGE_LOG_DIR", "/tmp/concierge_plus_logs")
+    override = os.getenv("CONCIERGE_LOG_DIR")
+    if override:
+        return override
+    if os.path.isdir("/var/data"):
+        return "/var/data/concierge_plus_logs"
+    return "/tmp/concierge_plus_logs"
 
 
 def truncate(text: str, max_chars: int = 20000) -> str:

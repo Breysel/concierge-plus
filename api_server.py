@@ -30,7 +30,7 @@ from backend.telemetry import (
     append_jsonl,
     extract_urls_from_markdown,
 )
-from backend.llm import call_anthropic_router
+from backend.llm import call_anthropic, call_anthropic_router
 
 VERSION = "router-v2"
 
@@ -50,6 +50,7 @@ class ChatRequest(BaseModel):
     message: str
     history: Optional[List[HistoryItem]] = None
     conversation_id: Optional[str] = None
+    debug: Optional[bool] = None
 
 
 class ChatResponse(BaseModel):
@@ -72,6 +73,22 @@ app.add_middleware(
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {"ok": True, "version": VERSION}
+
+
+@app.on_event("startup")
+def preload_catalog() -> None:
+    if os.getenv("PRELOAD_CATALOG", "1") == "0":
+        return
+    try:
+        catalog_path = os.getenv("CATALOG_CSV_PATH")
+        if catalog_path and catalog_path.startswith(("http://", "https://")):
+            catalog.ensure_catalog_downloaded(catalog_path)
+            local_path = catalog.get_catalog_local_path(catalog_path)
+        else:
+            local_path = catalog.get_catalog_local_path()
+        catalog.load_catalog(local_path)
+    except Exception as exc:
+        print(f"Warning: catalog preload failed: {exc}")
 
 
 def _now() -> float:
@@ -447,38 +464,21 @@ def build_effective_query(
 def call_anthropic_env(
     system: str, messages: List[Dict[str, str]], model: Optional[str] = None
 ) -> str:
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="Missing ANTHROPIC_API_KEY in environment.",
-        )
-
-    try:
-        from anthropic import Anthropic
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    client = Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model=model or os.getenv("CLAUDE_MODEL", "claude-3-haiku-20240307"),
-        temperature=0.2,
-        system=system,
-        messages=messages,
-        max_tokens=700,
-    )
-    return response.content[0].text
+    reply, error = call_anthropic(system, messages, model=model)
+    if error:
+        raise HTTPException(status_code=500, detail=error)
+    return reply or ""
 
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
-    start_time = time.time()
+    start_time = time.perf_counter()
     message = (request.message or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message is required.")
 
     request_history = request.history or []
-    debug_enabled = os.getenv("DEBUG", "").lower() == "true"
+    debug_enabled = request.debug is True or os.getenv("DEBUG", "").lower() == "true"
 
     conversation_id = get_or_create_conversation(request.conversation_id)
     request_id = str(uuid.uuid4())
@@ -554,12 +554,12 @@ def chat(request: ChatRequest) -> ChatResponse:
         if should_use_router(message, effective_history):
             router_used = True
             router_prompt = build_router_prompt(message, conversation_context=conversation_context)
-            router_start = time.time()
+            router_start = time.perf_counter()
             router_text, router_error = call_anthropic_router(
                 ROUTER_RULES,
                 [{"role": "user", "content": router_prompt}],
             )
-            router_ms = int((time.time() - router_start) * 1000)
+            router_ms = int((time.perf_counter() - router_start) * 1000)
             if router_text and not router_error:
                 router_raw_text = router_text
                 router_payload = parse_router_response(router_text)
@@ -598,11 +598,11 @@ def chat(request: ChatRequest) -> ChatResponse:
             system = f"{SYSTEM_PROMPT}\n\n{rules}"
             system_prompt = system
             user_prompt = prompt
-            writer_start = time.time()
+            writer_start = time.perf_counter()
             assistant_reply = call_anthropic_env(
                 system, [{"role": "user", "content": prompt}], model=model_name
             )
-            writer_ms = int((time.time() - writer_start) * 1000)
+            writer_ms = int((time.perf_counter() - writer_start) * 1000)
         else:
             mode = "reco"
             prompt_type = "reco"
@@ -627,7 +627,7 @@ def chat(request: ChatRequest) -> ChatResponse:
                 strategy,
                 message,
             )
-            search_start = time.time()
+            search_start = time.perf_counter()
             try:
                 candidates = catalog.search(
                     {
@@ -644,7 +644,7 @@ def chat(request: ChatRequest) -> ChatResponse:
                     "can't recommend albums until the catalog is connected."
                 )
                 candidates = []
-            catalog_search_ms = int((time.time() - search_start) * 1000)
+            catalog_search_ms = int((time.perf_counter() - search_start) * 1000)
 
             candidate_count = len(candidates)
             used_catalog = candidate_count > 0
@@ -673,14 +673,14 @@ def chat(request: ChatRequest) -> ChatResponse:
                 system = f"{SYSTEM_PROMPT}\n\n{RECO_RULES}"
                 system_prompt = system
                 user_prompt = prompt
-                writer_start = time.time()
+                writer_start = time.perf_counter()
                 assistant_reply = call_anthropic_env(
                     system, [{"role": "user", "content": prompt}], model=model_name
                 )
-                writer_ms = int((time.time() - writer_start) * 1000)
+                writer_ms = int((time.perf_counter() - writer_start) * 1000)
     except Exception as exc:
         error_detail = f"{exc.__class__.__name__}: {exc}\n{traceback.format_exc(limit=5)}"
-        latency_ms = int((time.time() - start_time) * 1000)
+        latency_ms = int((time.perf_counter() - start_time) * 1000)
         append_jsonl(
             jsonl_path,
             {
@@ -748,7 +748,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     if assistant_reply:
         append_turn(conversation_id, "assistant", assistant_reply)
 
-    total_ms = int((time.time() - start_time) * 1000)
+    total_ms = int((time.perf_counter() - start_time) * 1000)
     print(
         f"chat timings total={total_ms}ms router={router_ms}ms search={catalog_search_ms}ms "
         f"writer={writer_ms}ms router_used={router_used}"
@@ -759,13 +759,15 @@ def chat(request: ChatRequest) -> ChatResponse:
         response.debug = {
             "used_catalog": used_catalog,
             "candidate_count": candidate_count,
-            "router_ms": router_ms,
-            "catalog_search_ms": catalog_search_ms,
-            "writer_ms": writer_ms,
-            "total_ms": total_ms,
+            "timings_ms": {
+                "router_ms": router_ms,
+                "catalog_search_ms": catalog_search_ms,
+                "writer_ms": writer_ms,
+                "total_ms": total_ms,
+            },
         }
 
-    latency_ms = int((time.time() - start_time) * 1000)
+    latency_ms = int((time.perf_counter() - start_time) * 1000)
     append_jsonl(
         jsonl_path,
         {

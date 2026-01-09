@@ -1,7 +1,8 @@
 import os
 import re
+import tempfile
 from functools import lru_cache
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -10,7 +11,7 @@ from rapidfuzz import fuzz, process
 
 from backend.ranking import rank_metrics
 
-CATALOG_TMP_PATH = "/tmp/catalog.csv"
+DEFAULT_CATALOG_FILENAME = "catalog.csv"
 
 TEXT_COLS = [
     "album_title",
@@ -48,17 +49,15 @@ def _clean_text_series(series: pd.Series) -> pd.Series:
 
 
 @lru_cache(maxsize=2)
-def load_catalog(path: str) -> pd.DataFrame:
-    if _is_url(path):
-        path = _download_catalog(path)
-    elif not os.path.exists(path):
+def load_catalog(local_path: str) -> pd.DataFrame:
+    if not os.path.exists(local_path):
         raise FileNotFoundError(
-            "Catalog CSV not found. Set CATALOG_CSV_PATH to a valid file path."
+            "Catalog CSV not found. Set CATALOG_CSV_PATH to a valid file path or URL."
         )
     try:
-        df = pd.read_csv(path)
+        df = pd.read_csv(local_path)
     except Exception as exc:
-        raise RuntimeError(f"Failed to parse catalog CSV at {path}.") from exc
+        raise RuntimeError(f"Failed to parse catalog CSV at {local_path}.") from exc
 
     for col in TEXT_COLS:
         if col not in df.columns:
@@ -103,6 +102,14 @@ def _resolve_catalog_path() -> str:
     )
 
 
+def ensure_catalog_downloaded(path: str) -> str:
+    resolved = path or _resolve_catalog_path()
+    if _is_url(resolved):
+        destination = get_catalog_local_path(resolved)
+        return _download_catalog(resolved, destination)
+    return resolved
+
+
 def _normalize_album_url(value: str) -> str:
     if not value:
         return ""
@@ -121,20 +128,50 @@ def _is_url(value: str) -> bool:
     return value.startswith("http://") or value.startswith("https://")
 
 
-def _download_catalog(url: str) -> str:
-    if os.path.exists(CATALOG_TMP_PATH):
-        return CATALOG_TMP_PATH
+def _get_catalog_cache_dir() -> str:
+    override = os.getenv("CATALOG_CACHE_DIR")
+    if override:
+        return override
+    if os.path.isdir("/var/data"):
+        return "/var/data"
+    return "/tmp"
+
+
+def get_catalog_local_path(path: Optional[str] = None) -> str:
+    resolved = path or _resolve_catalog_path()
+    if _is_url(resolved):
+        cache_dir = _get_catalog_cache_dir()
+        os.makedirs(cache_dir, exist_ok=True)
+        return os.path.join(cache_dir, DEFAULT_CATALOG_FILENAME)
+    return resolved
+
+
+def _download_catalog(url: str, destination: str) -> str:
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    force_refresh = os.getenv("CATALOG_FORCE_REFRESH") == "1"
+    if (
+        not force_refresh
+        and os.path.exists(destination)
+        and os.path.getsize(destination) > 0
+    ):
+        return destination
     try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        with open(CATALOG_TMP_PATH, "wb") as handle:
-            handle.write(response.content)
+        with requests.get(url, timeout=30, stream=True) as response:
+            response.raise_for_status()
+            with tempfile.NamedTemporaryFile(
+                dir=os.path.dirname(destination), delete=False
+            ) as temp_file:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        temp_file.write(chunk)
+                temp_name = temp_file.name
+        os.replace(temp_name, destination)
     except Exception as exc:
         raise RuntimeError(
             "Failed to download catalog CSV from URL. Check CATALOG_CSV_PATH."
         ) from exc
-    print(f"Catalog downloaded from URL to {CATALOG_TMP_PATH}")
-    return CATALOG_TMP_PATH
+    print(f"Catalog downloaded from URL to {destination}")
+    return destination
 
 
 def _list_filter_mask(series: pd.Series, values: List[str]) -> pd.Series:
@@ -154,7 +191,11 @@ def search(request: Dict[str, Any]) -> List[Dict[str, Any]]:
     limit = int(request.get("limit") or 30)
     rank_by = (request.get("rank_by") or "").strip()
 
-    df = load_catalog(_resolve_catalog_path())
+    resolved_path = _resolve_catalog_path()
+    local_path = get_catalog_local_path(resolved_path)
+    if _is_url(resolved_path):
+        local_path = ensure_catalog_downloaded(resolved_path)
+    df = load_catalog(local_path)
 
     deep_cuts_strict = bool(filters.get("deep_cuts_strict"))
 

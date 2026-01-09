@@ -1,5 +1,10 @@
 import os
+from functools import lru_cache
 from typing import List, Dict, Optional, Tuple, Generator
+
+
+DEFAULT_WRITER_MODEL = "claude-3-haiku-20240307"
+DEFAULT_ROUTER_MODEL = "claude-3-haiku-20240307"
 
 
 def get_secret(name: str) -> Optional[str]:
@@ -18,6 +23,14 @@ def _get_anthropic_api_key() -> Optional[str]:
     return get_secret("ANTHROPIC_API_KEY")
 
 
+@lru_cache(maxsize=2)
+def get_anthropic_client(api_key: str):
+    from anthropic import Anthropic
+
+    timeout = int(os.getenv("ANTHROPIC_TIMEOUT_SECONDS", "30"))
+    return Anthropic(api_key=api_key, timeout=timeout)
+
+
 def call_anthropic(
     system: str,
     messages: List[Dict[str, str]],
@@ -31,9 +44,7 @@ def call_anthropic(
         return None, "Missing ANTHROPIC_API_KEY"
 
     try:
-        from anthropic import Anthropic
-
-        resolved_model = model or os.getenv("CLAUDE_MODEL", "claude-3-haiku-20240307")
+        resolved_model = model or os.getenv("CLAUDE_MODEL", DEFAULT_WRITER_MODEL)
         resolved_temp = (
             temperature if temperature is not None else float(os.getenv("CLAUDE_TEMPERATURE", "0.3"))
         )
@@ -44,7 +55,7 @@ def call_anthropic(
         if timeout is not None:
             resolved_timeout = int(timeout)
 
-        client = Anthropic(api_key=api_key)
+        client = get_anthropic_client(api_key)
         response = client.messages.create(
             model=resolved_model,
             temperature=resolved_temp,
@@ -70,9 +81,7 @@ def call_anthropic_stream(
     if not api_key:
         raise RuntimeError("Missing ANTHROPIC_API_KEY")
 
-    from anthropic import Anthropic
-
-    resolved_model = model or os.getenv("CLAUDE_MODEL", "claude-3-haiku-20240307")
+    resolved_model = model or os.getenv("CLAUDE_MODEL", DEFAULT_WRITER_MODEL)
     resolved_temp = (
         temperature if temperature is not None else float(os.getenv("CLAUDE_TEMPERATURE", "0.3"))
     )
@@ -83,7 +92,7 @@ def call_anthropic_stream(
     if timeout is not None:
         resolved_timeout = int(timeout)
 
-    client = Anthropic(api_key=api_key)
+    client = get_anthropic_client(api_key)
     with client.messages.stream(
         model=resolved_model,
         temperature=resolved_temp,
@@ -112,9 +121,7 @@ def call_anthropic_router(
         return None, "Missing ANTHROPIC_API_KEY"
 
     try:
-        from anthropic import Anthropic
-
-        resolved_model = model or os.getenv("CLAUDE_ROUTER_MODEL", "claude-3-haiku-20240307")
+        resolved_model = model or os.getenv("CLAUDE_ROUTER_MODEL", DEFAULT_ROUTER_MODEL)
         resolved_temp = 0.0 if temperature is None else float(temperature)
         resolved_max_tokens = int(os.getenv("CLAUDE_ROUTER_MAX_TOKENS", "120"))
         if max_tokens is not None:
@@ -123,7 +130,7 @@ def call_anthropic_router(
         if timeout is not None:
             resolved_timeout = int(timeout)
 
-        client = Anthropic(api_key=api_key)
+        client = get_anthropic_client(api_key)
         response = client.messages.create(
             model=resolved_model,
             temperature=resolved_temp,
