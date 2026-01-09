@@ -208,6 +208,146 @@ def should_smalltalk(text: str, history: List[Dict[str, str]]) -> bool:
     return any(phrase in lowered for phrase in smalltalk_triggers)
 
 
+def should_smalltalk_fast(message: str, history: List[Dict[str, str]]) -> bool:
+    lowered = (message or "").strip().lower()
+    if not lowered:
+        return False
+    smalltalk_only = [
+        "hello",
+        "hi",
+        "hey",
+        "thanks",
+        "thx",
+        "who are you",
+        "help",
+        "what can you do",
+    ]
+    reco_intent = [
+        "something funny",
+        "something dark",
+        "something calm",
+        "give me",
+        "recommend",
+        "music for",
+        "make it",
+        "bach",
+        "mozart",
+        "beethoven",
+    ]
+    if any(phrase in lowered for phrase in reco_intent):
+        return False
+    return any(phrase in lowered for phrase in smalltalk_only)
+
+
+def should_use_router(message: str, history: List[Dict[str, str]]) -> bool:
+    lowered = (message or "").strip().lower()
+    if not lowered:
+        return False
+    if should_smalltalk_fast(message, history):
+        return False
+
+    anchors = [
+        "bach",
+        "mozart",
+        "beethoven",
+        "chopin",
+        "mahler",
+        "piano",
+        "violin",
+        "cello",
+        "symphony",
+        "concerto",
+        "opera",
+        "quartet",
+        "requiem",
+        "orchestra",
+        "choral",
+    ]
+    explicit_modes = [
+        "atmos",
+        "dolby",
+        "spatial",
+        "hidden gem",
+        "deep dive",
+        "obscure",
+        "underrated",
+        "study",
+        "focus",
+        "sleep",
+        "relax",
+        "calm",
+        "dark",
+        "funny",
+        "energ",
+    ]
+    refinement_phrases = [
+        "darker",
+        "calmer",
+        "funnier",
+        "more like that",
+        "similar",
+        "another",
+        "continue",
+        "less opera",
+        "no vocals",
+    ]
+
+    if len(history) == 0 and len(lowered.split()) <= 6 and any(a in lowered for a in anchors):
+        return False
+    if any(m in lowered for m in explicit_modes):
+        return False
+    if len(history) > 0 and len(lowered.split()) <= 5 and any(p in lowered for p in refinement_phrases):
+        return True
+    return False
+
+
+def fast_route(message: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
+    lowered = (message or "").strip().lower()
+    filters = {
+        "epochs": [],
+        "genres": [],
+        "exclude_genres": [],
+        "soloist_instruments": [],
+        "is_atmos": None,
+        "min_unique_users": None,
+    }
+    strategy = "gateway"
+    rank_by = "score_poplite"
+
+    if any(x in lowered for x in ["atmos", "dolby", "spatial"]):
+        strategy = "atmos"
+        filters["is_atmos"] = True
+        rank_by = "score_poplite"
+    elif any(x in lowered for x in ["hidden gem", "deep dive", "obscure", "underrated"]):
+        strategy = "deep_dive"
+        rank_by = "score_hidden_gem"
+        filters["min_unique_users"] = 0
+    elif any(x in lowered for x in ["study", "focus", "sleep", "relax", "calm", "dark", "funny", "energ"]):
+        strategy = "vibe"
+        rank_by = "score_sticky"
+    elif any(
+        x in lowered for x in ["bach", "mozart", "beethoven", "chopin", "mahler", "tchaikovsky"]
+    ):
+        strategy = "performer_led"
+        rank_by = "score_poplite"
+
+    if "no opera" in lowered or "without opera" in lowered:
+        filters["exclude_genres"] = ["opera"]
+    if any(x in lowered for x in ["no vocals", "no singing", "instrumental only", "no choir"]):
+        filters["exclude_genres"] = list(
+            dict.fromkeys(filters["exclude_genres"] + ["opera", "vocal", "choral"])
+        )
+
+    return {
+        "intent": "reco",
+        "strategy": strategy,
+        "query": message,
+        "search_terms": [],
+        "rank_by": rank_by,
+        "filters": filters,
+    }
+
+
 def build_history_summary(history: List[Dict[str, str]], current_message: str) -> str:
     user_messages = [
         item.get("content")
@@ -380,6 +520,8 @@ def chat(request: ChatRequest) -> ChatResponse:
     top_candidates: List[Dict[str, Any]] = []
     router_decision: Optional[Dict[str, Any]] = None
     effective_search_query = ""
+    catalog_search_ms = 0
+    writer_ms = 0
     system_prompt = ""
     user_prompt = ""
     assistant_reply = ""
@@ -389,53 +531,41 @@ def chat(request: ChatRequest) -> ChatResponse:
 
     router_payload = None
     router_raw_text = ""
-    router_prompt = build_router_prompt(message, conversation_context=conversation_context)
-    router_text, router_error = call_anthropic_router(
-        ROUTER_RULES,
-        [{"role": "user", "content": router_prompt}],
-        model=os.getenv("CLAUDE_ROUTER_MODEL", "claude-3-haiku-20240307"),
-        max_tokens=250,
-    )
-    if router_text and not router_error:
-        router_raw_text = router_text
-        router_payload = parse_router_response(router_text)
+    router_used = False
+    router_ms = 0
 
-    if not router_payload:
-        if should_smalltalk(message, effective_history):
-            router_payload = {
-                "intent": "smalltalk",
-                "strategy": "gateway",
-                "query": message,
-                "rank_by": "score_poplite",
-                "search_terms": [],
-                "filters": {
-                    "epochs": [],
-                    "genres": [],
-                    "exclude_genres": [],
-                    "soloist_instruments": [],
-                    "is_atmos": None,
-                    "min_unique_users": None,
-                },
-            }
-        else:
-            mode_and_filters = infer_mode_and_filters(message)
-            router_payload = {
-                "intent": "reco",
-                "strategy": mode_and_filters["mode"],
-                "query": message,
-                "rank_by": "score_poplite",
-                "search_terms": [],
-                "filters": {
-                    "epochs": mode_and_filters["filters"].get("epochs", []),
-                    "genres": mode_and_filters["filters"].get("genres", []),
-                    "exclude_genres": mode_and_filters["filters"].get("exclude_genres", []),
-                    "soloist_instruments": mode_and_filters["filters"].get(
-                        "soloist_instruments", []
-                    ),
-                    "is_atmos": mode_and_filters["filters"].get("is_atmos"),
-                    "min_unique_users": mode_and_filters["filters"].get("min_unique_users"),
-                },
-            }
+    if should_smalltalk_fast(message, effective_history):
+        router_payload = {
+            "intent": "smalltalk",
+            "strategy": "gateway",
+            "query": message,
+            "rank_by": "score_poplite",
+            "search_terms": [],
+            "filters": {
+                "epochs": [],
+                "genres": [],
+                "exclude_genres": [],
+                "soloist_instruments": [],
+                "is_atmos": None,
+                "min_unique_users": None,
+            },
+        }
+    else:
+        if should_use_router(message, effective_history):
+            router_used = True
+            router_prompt = build_router_prompt(message, conversation_context=conversation_context)
+            router_start = time.time()
+            router_text, router_error = call_anthropic_router(
+                ROUTER_RULES,
+                [{"role": "user", "content": router_prompt}],
+            )
+            router_ms = int((time.time() - router_start) * 1000)
+            if router_text and not router_error:
+                router_raw_text = router_text
+                router_payload = parse_router_response(router_text)
+
+        if not router_payload:
+            router_payload = fast_route(message, effective_history)
 
     router_decision = router_payload
     intent = (router_payload.get("intent") or "reco").strip().lower()
@@ -468,9 +598,11 @@ def chat(request: ChatRequest) -> ChatResponse:
             system = f"{SYSTEM_PROMPT}\n\n{rules}"
             system_prompt = system
             user_prompt = prompt
+            writer_start = time.time()
             assistant_reply = call_anthropic_env(
                 system, [{"role": "user", "content": prompt}], model=model_name
             )
+            writer_ms = int((time.time() - writer_start) * 1000)
         else:
             mode = "reco"
             prompt_type = "reco"
@@ -495,6 +627,7 @@ def chat(request: ChatRequest) -> ChatResponse:
                 strategy,
                 message,
             )
+            search_start = time.time()
             try:
                 candidates = catalog.search(
                     {
@@ -511,6 +644,7 @@ def chat(request: ChatRequest) -> ChatResponse:
                     "can't recommend albums until the catalog is connected."
                 )
                 candidates = []
+            catalog_search_ms = int((time.time() - search_start) * 1000)
 
             candidate_count = len(candidates)
             used_catalog = candidate_count > 0
@@ -539,9 +673,11 @@ def chat(request: ChatRequest) -> ChatResponse:
                 system = f"{SYSTEM_PROMPT}\n\n{RECO_RULES}"
                 system_prompt = system
                 user_prompt = prompt
+                writer_start = time.time()
                 assistant_reply = call_anthropic_env(
                     system, [{"role": "user", "content": prompt}], model=model_name
                 )
+                writer_ms = int((time.time() - writer_start) * 1000)
     except Exception as exc:
         error_detail = f"{exc.__class__.__name__}: {exc}\n{traceback.format_exc(limit=5)}"
         latency_ms = int((time.time() - start_time) * 1000)
@@ -562,6 +698,10 @@ def chat(request: ChatRequest) -> ChatResponse:
                 "router_decision": router_decision,
                 "effective_search_query": effective_search_query,
                 "rank_by": rank_by,
+                "router_ms": router_ms,
+                "catalog_search_ms": catalog_search_ms,
+                "writer_ms": writer_ms,
+                "total_ms": latency_ms,
                 "prompt_type": prompt_type,
                 "anthropic_model": model_name,
                 "system_prompt_sent_to_claude": truncate(system_prompt),
@@ -608,11 +748,21 @@ def chat(request: ChatRequest) -> ChatResponse:
     if assistant_reply:
         append_turn(conversation_id, "assistant", assistant_reply)
 
+    total_ms = int((time.time() - start_time) * 1000)
+    print(
+        f"chat timings total={total_ms}ms router={router_ms}ms search={catalog_search_ms}ms "
+        f"writer={writer_ms}ms router_used={router_used}"
+    )
+
     response = ChatResponse(reply=assistant_reply or "", mode=mode, conversation_id=conversation_id)
     if debug_enabled:
         response.debug = {
             "used_catalog": used_catalog,
             "candidate_count": candidate_count,
+            "router_ms": router_ms,
+            "catalog_search_ms": catalog_search_ms,
+            "writer_ms": writer_ms,
+            "total_ms": total_ms,
         }
 
     latency_ms = int((time.time() - start_time) * 1000)
@@ -633,6 +783,10 @@ def chat(request: ChatRequest) -> ChatResponse:
             "router_decision": router_decision,
             "effective_search_query": effective_search_query,
             "rank_by": rank_by,
+            "router_ms": router_ms,
+            "catalog_search_ms": catalog_search_ms,
+            "writer_ms": writer_ms,
+            "total_ms": latency_ms,
             "prompt_type": prompt_type,
             "anthropic_model": model_name,
             "system_prompt_sent_to_claude": truncate(system_prompt),

@@ -61,6 +61,12 @@ Admin export endpoints (optional):
 - `GET /admin/logs/chat_turns.csv`
 
 To enable, set `ADMIN_TOKEN` and pass header `X-Admin-Token: <token>`. If `ADMIN_TOKEN` is not set, the endpoints return 404. Logs are ephemeral on Render free tier and reset on redeploy.
+
+## Sanity checks (manual)
+
+- `/health` returns `version: router-v2` after deploy.
+- `/chat` with "hello" mid-chat stays short (no onboarding bullets).
+- `/chat` with "give me bach" then "something funny" keeps the Bach anchor.
 https://drive.google.com/uc?export=download&id=1wR_FcZMJeDVtKM_hGVNNDuUIOgoGvg-D
 ```
 

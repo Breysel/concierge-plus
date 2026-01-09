@@ -4,39 +4,21 @@ from typing import List, Dict, Any, Optional
 SYSTEM_PROMPT = "Stage+ Concierge Plus (MVP)"
 
 ROUTER_RULES = """
-You are a routing assistant for a classical music concierge. Return ONLY valid JSON.
+Return JSON only (no extra text).
+Schema:
+{intent, strategy, query, search_terms, rank_by, filters{epochs, genres, exclude_genres, soloist_instruments, is_atmos, min_unique_users}}
 
-Decide intent + retrieval strategy based on the latest user message and recent context.
+Routing:
+- greetings/thanks/meta only => intent=smalltalk
+- mood words (funny/dark/calm/energetic) => strategy=vibe
+- hidden gem/obscure/surprise => strategy=deep_dive + rank_by=score_hidden_gem (strict if very niche)
+- atmos/dolby => strategy=atmos + filters.is_atmos=true
+- known composer/artist => performer_led or find
+- continue/more like this => strategy=continue
+- otherwise gateway
 
-Output JSON schema (exact keys):
-{
-  "intent": "reco" | "smalltalk",
-  "strategy": "find" | "gateway" | "vibe" | "deep_dive" | "performer_led" | "atmos" | "continue",
-  "query": "string",
-  "search_terms": ["string", "..."],
-  "rank_by": "score_poplite" | "score_hidden_gem" | "score_hidden_gem_strict" | "score_sticky" | "unique_users",
-  "filters": {
-    "epochs": ["..."],
-    "genres": ["..."],
-    "exclude_genres": ["..."],
-    "soloist_instruments": ["..."],
-    "is_atmos": null | true,
-    "min_unique_users": null | number
-  }
-}
-
-Rules:
-- greetings/thanks/meta only => intent="smalltalk"
-- mood words like funny/dark/calm/energetic => intent="reco", strategy="vibe"
-- "hidden gem"/"surprise me"/"obscure" => strategy="deep_dive" and rank_by="score_hidden_gem" (use strict if user says very niche)
-- if user says dolby/atmos => filters.is_atmos=true and strategy="atmos" and rank_by="score_poplite"
-- if user references a known composer/artist => strategy="performer_led" or "find"
-- "continue" when user wants more like previous results
-- query should be a concise search string (can be the user message)
-- If the user is refining (e.g., "something darker/funnier/more intense"), preserve anchors from recent conversation
-  by including them in query or search_terms.
-- Optional filters MUST be null unless explicitly requested; do NOT output is_atmos=false.
-- If no filters, return empty arrays and nulls.
+Filters must be null unless explicitly requested. Never output is_atmos=false.
+If refining a prior request, preserve anchors from context in query/search_terms.
 """.strip()
 
 RECO_RULES = """
@@ -90,21 +72,21 @@ OUTPUT FORMAT (exactly this structure):
 {one short mirroring sentence}
 
 1) **[{album_title} — {artists}]({album_url})** (if no album_url, use **{album_title} — {artists}**)
-{2-3 sentences explaining why it fits, in natural prose.}
+{1-2 sentences explaining why it fits, in natural prose.}
 {If is_atmos is true, you may add: "Also available in Dolby Atmos."}
 
 2) **[{album_title} — {artists}]({album_url})** (if no album_url, use **{album_title} — {artists}**)
-{2-3 sentences}
+{1-2 sentences}
 
 3) **[{album_title} — {artists}]({album_url})** (if no album_url, use **{album_title} — {artists}**)
-{2-3 sentences}
+{1-2 sentences}
 
 Follow-up: {one short knob question}
 Feedback: {one short feedback question}
 """.strip()
 
 
-def build_candidate_payload(candidates: List[Dict[str, Any]], limit: int = 20) -> str:
+def build_candidate_payload(candidates: List[Dict[str, Any]], limit: int = 12) -> str:
     compact = []
     for item in candidates[:limit]:
         compact.append(
