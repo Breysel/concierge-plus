@@ -84,7 +84,6 @@ Check service status.
 ├── api_server.py          # FastAPI application
 ├── backend/
 │   ├── catalog.py         # Catalog loading and search
-│   ├── filters.py         # Query filter extraction
 │   ├── llm.py             # Anthropic API calls
 │   ├── prompts.py         # System prompts and templates
 │   ├── ranking.py         # Scoring strategies

@@ -1,287 +1,178 @@
+"""
+Simplified routing - always use LLM for intent classification.
+Quality over cost. Claude understands nuance better than keyword matching.
+"""
+
 import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from backend.filters import infer_filters
 from backend.llm import call_anthropic_router
-from backend.prompts import ROUTER_RULES, build_router_prompt
+
+ROUTER_SYSTEM = """
+You are a routing classifier for a classical music recommendation chatbot.
+
+Analyze the user's message and return JSON with this exact schema:
+{
+  "intent": "smalltalk" | "meta" | "reco",
+  "strategy": "gateway" | "performer_led" | "vibe" | "deep_dive" | "atmos" | "continue",
+  "query": "search query to use",
+  "search_terms": ["additional", "search", "terms"],
+  "rank_by": "score_poplite" | "score_sticky" | "score_hidden_gem",
+  "filters": {
+    "epochs": [],
+    "genres": [],
+    "exclude_genres": [],
+    "soloist_instruments": [],
+    "is_atmos": null,
+    "min_unique_users": null
+  }
+}
+
+INTENT CLASSIFICATION (most important):
+
+"smalltalk":
+  - Greetings: hi, hello, hey, good morning
+  - Thanks: thanks, thank you, appreciate it
+  - Help: what can you do, how does this work
+
+"meta":
+  - Questions about the concierge itself: what do you like, what's your favorite, do you have preferences
+  - Philosophical: how do you experience music, do you care about music, what moves you
+  - Personal: tell me about yourself, who are you (beyond basic help)
+  - Opinion requests: what should I listen to (without any criteria given)
+  - Feedback responses: that was great, I loved it, not what I wanted (without new request)
+
+"reco":
+  - Explicit requests: recommend, suggest, give me, play, find me
+  - Composer/performer mentions: Bach, Mozart, Karajan, Yo-Yo Ma
+  - Mood/vibe requests: something dark, calming music, energetic
+  - Instrument requests: piano music, violin concertos
+  - Context requests: music for studying, dinner party, workout
+  - Refinements with criteria: darker, more like that but calmer, less vocals
+
+IMPORTANT: If the user is having a conversation (asking about you, sharing feelings, giving feedback without a new request),
+classify as "meta" NOT "reco". The concierge should be able to chat without always recommending albums.
+
+STRATEGY (only matters if intent is "reco"):
+- "gateway": general/unclear requests
+- "performer_led": specific composer or performer mentioned
+- "vibe": mood/feeling words (dark, calm, energetic, romantic)
+- "deep_dive": hidden gems, obscure, underrated
+- "atmos": Dolby Atmos, spatial audio
+- "continue": refining previous request
+
+FILTERS (only populate when explicitly requested):
+- Handle negations: "no opera" -> exclude_genres: ["opera"]
+- Handle "no vocals/singing" -> exclude_genres: ["opera", "vocal", "choral"]
+
+Return ONLY valid JSON, no explanation.
+""".strip()
 
 
-def should_smalltalk_fast(message: str, history: List[Dict[str, str]]) -> bool:
-    lowered = (message or "").strip().lower()
-    if not lowered:
-        return False
-    smalltalk_only = [
-        "hello",
-        "hi",
-        "hey",
-        "thanks",
-        "thx",
-        "who are you",
-        "help",
-        "what can you do",
-    ]
-    reco_intent = [
-        "something funny",
-        "something dark",
-        "something calm",
-        "give me",
-        "recommend",
-        "music for",
-        "make it",
-        "bach",
-        "mozart",
-        "beethoven",
-    ]
-    if any(phrase in lowered for phrase in reco_intent):
-        return False
-    return any(phrase in lowered for phrase in smalltalk_only)
+def _build_router_prompt(message: str, conversation_context: Optional[str] = None) -> str:
+    """Build the prompt for the router LLM."""
+    parts = []
+    if conversation_context:
+        parts.append(f"Recent conversation:\n{conversation_context[:1500]}\n")
+    parts.append(f"User message: {message}")
+    return "\n".join(parts)
 
 
-def should_smalltalk(message: str, history: List[Dict[str, str]]) -> bool:
-    lowered = (message or "").strip().lower()
-    if not lowered:
-        return False
-    smalltalk_triggers = [
-        "hi",
-        "hello",
-        "hey",
-        "thanks",
-        "thank you",
-        "help",
-        "what can you do",
-        "who are you",
-    ]
-    reco_intent = [
-        "something funny",
-        "something dark",
-        "something calm",
-        "recommend",
-        "give me",
-        "music for",
-        "suggest",
-    ]
-    if any(phrase in lowered for phrase in reco_intent):
-        return False
-    return any(phrase in lowered for phrase in smalltalk_triggers)
-
-
-def should_use_router(message: str, history: List[Dict[str, str]]) -> bool:
-    lowered = (message or "").strip().lower()
-    if not lowered:
-        return False
-    if should_smalltalk_fast(message, history):
-        return False
-
-    anchors = [
-        "bach",
-        "mozart",
-        "beethoven",
-        "chopin",
-        "mahler",
-        "piano",
-        "violin",
-        "cello",
-        "symphony",
-        "concerto",
-        "opera",
-        "quartet",
-        "requiem",
-        "orchestra",
-        "choral",
-    ]
-    explicit_modes = [
-        "atmos",
-        "dolby",
-        "spatial",
-        "hidden gem",
-        "deep dive",
-        "obscure",
-        "underrated",
-        "study",
-        "focus",
-        "sleep",
-        "relax",
-        "calm",
-        "dark",
-        "funny",
-        "energ",
-    ]
-    refinement_phrases = [
-        "darker",
-        "calmer",
-        "funnier",
-        "more like that",
-        "similar",
-        "another",
-        "continue",
-        "less opera",
-        "no vocals",
-    ]
-
-    if len(history) == 0 and len(lowered.split()) <= 6 and any(a in lowered for a in anchors):
-        return False
-    if any(m in lowered for m in explicit_modes):
-        return False
-    if len(history) > 0 and len(lowered.split()) <= 5 and any(p in lowered for p in refinement_phrases):
-        return True
-    return False
-
-
-def fast_route(message: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
-    lowered = (message or "").strip().lower()
-    filters = {
-        "epochs": [],
-        "genres": [],
-        "exclude_genres": [],
-        "soloist_instruments": [],
-        "is_atmos": None,
-        "min_unique_users": None,
-    }
-    strategy = "gateway"
-    rank_by = "score_poplite"
-
-    if any(x in lowered for x in ["atmos", "dolby", "spatial"]):
-        strategy = "atmos"
-        filters["is_atmos"] = True
-        rank_by = "score_poplite"
-    elif any(x in lowered for x in ["hidden gem", "deep dive", "obscure", "underrated"]):
-        strategy = "deep_dive"
-        rank_by = "score_hidden_gem"
-        filters["min_unique_users"] = 0
-    elif any(x in lowered for x in ["study", "focus", "sleep", "relax", "calm", "dark", "funny", "energ"]):
-        strategy = "vibe"
-        rank_by = "score_sticky"
-    elif any(
-        x in lowered for x in ["bach", "mozart", "beethoven", "chopin", "mahler", "tchaikovsky"]
-    ):
-        strategy = "performer_led"
-        rank_by = "score_poplite"
-
-    filters.update(infer_filters(message))
-
-    return {
-        "intent": "reco",
-        "strategy": strategy,
-        "query": message,
-        "search_terms": [],
-        "rank_by": rank_by,
-        "filters": filters,
-    }
-
-
-def _extract_json_object(text: str) -> Optional[str]:
+def _parse_router_response(text: str) -> Optional[Dict[str, Any]]:
+    """Extract and parse JSON from router response."""
     if not text:
         return None
     text = text.strip()
-    if text.startswith("{") and text.endswith("}"):
-        return text
+
+    if text.startswith("```"):
+        lines = text.split("\n")
+        text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
+
     start = text.find("{")
     end = text.rfind("}")
     if start >= 0 and end > start:
-        return text[start : end + 1]
+        try:
+            return json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return None
     return None
 
 
-def parse_router_response(text: str) -> Optional[Dict[str, Any]]:
-    payload = _extract_json_object(text)
-    if not payload:
-        return None
-    try:
-        return json.loads(payload)
-    except json.JSONDecodeError:
-        return None
+def _default_route(message: str) -> Dict[str, Any]:
+    """Fallback route if LLM fails. Simple and safe."""
+    return {
+        "intent": "reco",
+        "strategy": "gateway",
+        "query": message,
+        "search_terms": [],
+        "rank_by": "score_poplite",
+        "filters": {
+            "epochs": [],
+            "genres": [],
+            "exclude_genres": [],
+            "soloist_instruments": [],
+            "is_atmos": None,
+            "min_unique_users": None,
+        },
+    }
 
 
-def _last_meaningful_user_message(history: List[Dict[str, str]]) -> str:
-    for item in reversed(history or []):
-        if item.get("role") == "user":
-            text = (item.get("content") or "").strip()
-            if text and len(text) >= 3:
-                if text.lower() not in {
-                    "why these recommendations?",
-                    "why these recommendations",
-                    "more",
-                    "more please",
-                }:
-                    return text
-    return ""
-
-
-def _looks_like_refinement_only(text: str) -> bool:
-    lowered = (text or "").strip().lower()
-    vibe_words = [
-        "dark",
-        "darker",
-        "calm",
-        "calmer",
-        "funny",
-        "weird",
-        "strange",
-        "sad",
-        "happier",
-        "more like that",
-        "similar",
-        "another",
-        "faster",
-        "slower",
-        "sleepy",
-        "focus",
-        "study",
-        "more intense",
-        "more intimate",
-        "more dramatic",
-    ]
-    if any(word in lowered for word in vibe_words):
-        return True
-    if len(lowered) <= 14 and any(word in lowered for word in ["more", "again", "another", "different", "else"]):
-        return True
-    return False
-
-
-def _contains_anchor(text: str) -> bool:
-    lowered = (text or "").lower()
-    anchors = [
-        "bach",
-        "mozart",
-        "beethoven",
-        "chopin",
-        "mahler",
-        "piano",
-        "violin",
-        "cello",
-        "symphony",
-        "concerto",
-        "opera",
-        "quartet",
-        "requiem",
-        "orchestra",
-        "choral",
-    ]
-    return any(anchor in lowered for anchor in anchors)
-
-
-def build_effective_query(
-    base_query: str,
-    search_terms: List[str],
+def route_message(
+    message: str,
     history: List[Dict[str, str]],
-    strategy: str,
-    user_message: str,
-) -> str:
-    query = (base_query or "").strip()
-    if search_terms:
-        query = f"{query} {' '.join(search_terms)}".strip()
-    if strategy in {"vibe", "continue"} and _looks_like_refinement_only(user_message):
-        if not _contains_anchor(user_message):
-            anchor = _last_meaningful_user_message(history)
-            if anchor and anchor.lower() not in query.lower():
-                query = f"{anchor} {query}".strip()
-    return query or user_message.strip()
+    conversation_context: Optional[str] = None,
+) -> Tuple[Dict[str, Any], str, bool, int]:
+    """
+    Route a user message using Claude Haiku.
+
+    Returns:
+        - route_decision: Dict with intent, strategy, filters, etc.
+        - raw_response: Raw LLM response text (for logging)
+        - router_used: Always True now (for logging compatibility)
+        - router_ms: Time taken in milliseconds
+    """
+    prompt = _build_router_prompt(message, conversation_context)
+
+    start = time.perf_counter()
+    response_text, error = call_anthropic_router(
+        system=ROUTER_SYSTEM,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    router_ms = int((time.perf_counter() - start) * 1000)
+
+    if error or not response_text:
+        print(f"Router error (using fallback): {error}")
+        return _default_route(message), "", True, router_ms
+
+    parsed = _parse_router_response(response_text)
+    if not parsed:
+        print(f"Router parse error (using fallback). Raw: {response_text[:200]}")
+        return _default_route(message), response_text, True, router_ms
+
+    route = {
+        "intent": parsed.get("intent", "reco"),
+        "strategy": parsed.get("strategy", "gateway"),
+        "query": parsed.get("query", message),
+        "search_terms": parsed.get("search_terms", []),
+        "rank_by": parsed.get("rank_by", "score_poplite"),
+        "filters": {
+            "epochs": parsed.get("filters", {}).get("epochs", []),
+            "genres": parsed.get("filters", {}).get("genres", []),
+            "exclude_genres": parsed.get("filters", {}).get("exclude_genres", []),
+            "soloist_instruments": parsed.get("filters", {}).get("soloist_instruments", []),
+            "is_atmos": parsed.get("filters", {}).get("is_atmos"),
+            "min_unique_users": parsed.get("filters", {}).get("min_unique_users"),
+        },
+    }
+
+    return route, response_text, True, router_ms
 
 
 def format_recent(
     history: List[Dict[str, str]], max_msgs: int = 6, max_chars_each: int = 350
 ) -> str:
+    """Format recent conversation history for context."""
     recent = history[-max_msgs:] if history else []
     lines = []
     for item in recent:
@@ -292,61 +183,22 @@ def format_recent(
     return "\n".join(lines)
 
 
-def route_message(
-    message: str,
+def build_effective_query(
+    base_query: str,
+    search_terms: List[str],
     history: List[Dict[str, str]],
-    conversation_context: Optional[str] = None,
-) -> Tuple[Dict[str, Any], str, bool, int]:
-    router_used = False
-    router_ms = 0
-    router_raw_text = ""
-
-    if should_smalltalk_fast(message, history):
-        return (
-            {
-                "intent": "smalltalk",
-                "strategy": "gateway",
-                "query": message,
-                "rank_by": "score_poplite",
-                "search_terms": [],
-                "filters": {
-                    "epochs": [],
-                    "genres": [],
-                    "exclude_genres": [],
-                    "soloist_instruments": [],
-                    "is_atmos": None,
-                    "min_unique_users": None,
-                },
-            },
-            router_raw_text,
-            router_used,
-            router_ms,
-        )
-
-    if should_use_router(message, history):
-        router_used = True
-        router_prompt = build_router_prompt(message, conversation_context=conversation_context)
-        router_start = time.perf_counter()
-        router_text, router_error = call_anthropic_router(
-            ROUTER_RULES,
-            [{"role": "user", "content": router_prompt}],
-        )
-        router_ms = int((time.perf_counter() - router_start) * 1000)
-        if router_text and not router_error:
-            router_raw_text = router_text
-            router_payload = parse_router_response(router_text)
-            if router_payload:
-                return router_payload, router_raw_text, router_used, router_ms
-
-    return fast_route(message, history), router_raw_text, router_used, router_ms
+    strategy: str,
+    user_message: str,
+) -> str:
+    """Build the final search query. LLM already handles context, so this is simpler now."""
+    query = (base_query or "").strip()
+    if search_terms:
+        query = f"{query} {' '.join(search_terms)}".strip()
+    return query or user_message.strip()
 
 
 __all__ = [
-    "format_recent",
-    "should_smalltalk_fast",
-    "should_smalltalk",
-    "should_use_router",
-    "fast_route",
     "route_message",
+    "format_recent",
     "build_effective_query",
 ]

@@ -17,7 +17,9 @@ from backend.prompts import (
     RECO_RULES,
     SMALLTALK_RULES_FIRST_TURN,
     SMALLTALK_RULES_ONGOING,
+    META_RULES,
     build_reco_prompt,
+    build_meta_prompt,
     build_smalltalk_prompt,
 )
 from backend.telemetry import (
@@ -32,7 +34,6 @@ from backend.routing import (
     build_effective_query,
     format_recent,
     route_message,
-    should_smalltalk,
 )
 
 VERSION = "router-v2"
@@ -269,10 +270,6 @@ def chat(request: ChatRequest) -> ChatResponse:
     if router_filters.get("is_atmos") is False:
         router_filters["is_atmos"] = None
 
-    heuristic_smalltalk = should_smalltalk(message, effective_history)
-    if intent == "smalltalk" and not heuristic_smalltalk:
-        intent = "reco"
-
     try:
         if intent == "smalltalk":
             prompt_type = "smalltalk"
@@ -287,6 +284,22 @@ def chat(request: ChatRequest) -> ChatResponse:
                 SMALLTALK_RULES_FIRST_TURN if is_first_turn else SMALLTALK_RULES_ONGOING
             )
             system = f"{SYSTEM_PROMPT}\n\n{rules}"
+            system_prompt = system
+            user_prompt = prompt
+            writer_start = time.perf_counter()
+            assistant_reply = call_anthropic_env(
+                system, [{"role": "user", "content": prompt}], model=model_name
+            )
+            writer_ms = int((time.perf_counter() - writer_start) * 1000)
+        elif intent == "meta":
+            prompt_type = "meta"
+            mode = "meta"
+            effective_search_query = message
+            prompt = build_meta_prompt(
+                message,
+                conversation_context=conversation_context,
+            )
+            system = f"{SYSTEM_PROMPT}\n\n{META_RULES}"
             system_prompt = system
             user_prompt = prompt
             writer_start = time.perf_counter()

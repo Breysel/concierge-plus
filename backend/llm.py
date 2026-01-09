@@ -156,7 +156,7 @@ def call_anthropic_router(
         resolved_max_tokens = int(os.getenv("CLAUDE_ROUTER_MAX_TOKENS", "200"))
         if max_tokens is not None:
             resolved_max_tokens = int(max_tokens)
-        resolved_max_tokens = min(resolved_max_tokens, 200)
+        resolved_max_tokens = min(resolved_max_tokens, 300)
         resolved_timeout = int(os.getenv("CLAUDE_ROUTER_TIMEOUT", "12"))
         if timeout is not None:
             resolved_timeout = int(timeout)
