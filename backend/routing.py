@@ -4,10 +4,12 @@ Quality over cost. Claude understands nuance better than keyword matching.
 """
 
 import json
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from backend.llm import call_anthropic_router
+from backend.filters import infer_filters
 
 ROUTER_SYSTEM = """
 You are a routing classifier for a classical music recommendation chatbot.
@@ -32,7 +34,7 @@ Analyze the user's message and return JSON with this exact schema:
 INTENT CLASSIFICATION (most important):
 
 "smalltalk":
-  - Greetings: hi, hello, hey, good morning
+  - Greetings: hi, hello, hey, yo, good morning
   - Thanks: thanks, thank you, appreciate it
   - Help: what can you do, how does this work
 
@@ -68,6 +70,29 @@ FILTERS (only populate when explicitly requested):
 
 Return ONLY valid JSON, no explanation.
 """.strip()
+
+
+def should_meta(message: str) -> bool:
+    m = (message or "").strip().lower()
+    if not m:
+        return False
+
+    reco_verbs = ["recommend", "suggest", "give me", "show me", "pick", "play", "find me"]
+    if any(v in m for v in reco_verbs):
+        return False
+
+    meta_triggers = [
+        "who are you",
+        "what can you do",
+        "how do you work",
+        "how do you experience",
+        "do you like",
+        "what do you like",
+        "what's your favorite",
+        "your favorite",
+        "do you care",
+    ]
+    return any(t in m for t in meta_triggers)
 
 
 def _build_router_prompt(message: str, conversation_context: Optional[str] = None) -> str:
@@ -132,6 +157,28 @@ def route_message(
         - router_used: Always True now (for logging compatibility)
         - router_ms: Time taken in milliseconds
     """
+    if should_meta(message):
+        return (
+            {
+                "intent": "meta",
+                "strategy": "gateway",
+                "query": message,
+                "rank_by": "score_poplite",
+                "search_terms": [],
+                "filters": {
+                    "epochs": [],
+                    "genres": [],
+                    "exclude_genres": [],
+                    "soloist_instruments": [],
+                    "is_atmos": None,
+                    "min_unique_users": None,
+                },
+            },
+            "",
+            False,
+            0,
+        )
+
     prompt = _build_router_prompt(message, conversation_context)
 
     start = time.perf_counter()
@@ -165,6 +212,10 @@ def route_message(
             "min_unique_users": parsed.get("filters", {}).get("min_unique_users"),
         },
     }
+
+    inferred = infer_filters(message)
+    if inferred.get("genres") and not route["filters"]["genres"]:
+        route["filters"]["genres"] = inferred.get("genres")
 
     return route, response_text, True, router_ms
 

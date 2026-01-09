@@ -382,10 +382,11 @@ def chat(request: ChatRequest) -> ChatResponse:
                     system, [{"role": "user", "content": prompt}], model=model_name
                 )
                 writer_ms = int((time.perf_counter() - writer_start) * 1000)
-            if not candidates and not assistant_reply:
+            if candidate_count == 0 and not assistant_reply:
                 assistant_reply = (
-                    "I couldn't find any albums matching that request. "
-                    "Try a different composer, mood, or instrument?"
+                    "I couldn't find matching albums in the catalog metadata for that yet. "
+                    "Try a jazz artist (e.g., Miles Davis / Coltrane) or tell me "
+                    "'vocal jazz' vs 'instrumental jazz'."
                 )
     except Exception as exc:
         error_detail = f"{exc.__class__.__name__}: {exc}\n{traceback.format_exc(limit=5)}"

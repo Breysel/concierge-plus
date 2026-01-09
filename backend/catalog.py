@@ -10,6 +10,7 @@ import requests
 from rapidfuzz import fuzz, process
 
 from backend.ranking import rank_metrics
+from backend.genre_infer import infer_is_jazz, add_genre
 
 DEFAULT_CATALOG_FILENAME = "catalog.csv"
 
@@ -58,6 +59,24 @@ def load_catalog(local_path: str) -> pd.DataFrame:
         df = pd.read_csv(local_path)
     except Exception as exc:
         raise RuntimeError(f"Failed to parse catalog CSV at {local_path}.") from exc
+
+    def apply_inferred_genres(frame: pd.DataFrame) -> pd.DataFrame:
+        def _row(r: pd.Series) -> str:
+            title = r.get("album_title")
+            artists = r.get("artists")
+            composers = r.get("composers")
+            epochs = r.get("epochs")
+            if infer_is_jazz(title, artists, composers, epochs):
+                existing = r.get("genres")
+                if pd.isna(existing):
+                    existing = ""
+                return add_genre(existing, "Jazz")
+            return r.get("genres")
+
+        frame["genres"] = frame.apply(_row, axis=1)
+        return frame
+
+    df = apply_inferred_genres(df)
 
     for col in TEXT_COLS:
         if col not in df.columns:
