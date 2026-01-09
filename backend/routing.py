@@ -121,10 +121,6 @@ def _default_route(message: str) -> Dict[str, Any]:
     }
 
 
-def fast_route(message: str) -> Dict[str, Any]:
-    return _default_route(message)
-
-
 def route_message(
     message: str,
     history: List[Dict[str, str]],
@@ -150,12 +146,12 @@ def route_message(
 
     if error or not response_text:
         print(f"Router error (using fallback): {error}")
-        return fast_route(message), "", True, router_ms
+        return _default_route(message), "", True, router_ms
 
     parsed = _parse_router_response(response_text)
     if not parsed:
         print(f"Router parse error (using fallback). Raw: {response_text[:200]}")
-        return fast_route(message), response_text, True, router_ms
+        return _default_route(message), response_text, True, router_ms
 
     route = {
         "intent": parsed.get("intent", "reco"),
@@ -212,5 +208,4 @@ __all__ = [
     "route_message",
     "format_recent",
     "build_effective_query",
-    "fast_route",
 ]
