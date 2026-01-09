@@ -8,12 +8,12 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from backend.llm import call_anthropic_router
-from backend.filters import infer_filters
 
 ROUTER_SYSTEM = """
-You are a routing classifier for a classical music recommendation chatbot.
+You are the intent + strategy router for the Stage+ Concierge (music discovery in the Stage+ catalog).
+Use semantic understanding in ANY language. Do NOT rely on hardcoded greeting word lists.
 
-Analyze the user's message and return JSON with this exact schema:
+Return ONLY valid JSON matching this schema exactly:
 {
   "intent": "smalltalk" | "meta" | "reco",
   "strategy": "gateway" | "performer_led" | "vibe" | "deep_dive" | "atmos" | "continue",
@@ -30,46 +30,51 @@ Analyze the user's message and return JSON with this exact schema:
   }
 }
 
-INTENT CLASSIFICATION (most important):
+INTENT (most important) — choose based on what the user wants NEXT:
 
-"smalltalk":
-  - Greetings/thanks/emoji in any language
-  - Help: what can you do, how does this work
+intent="reco" if the user is asking for music to listen to now:
+- direct asks: recommend/suggest/find/give me/play
+- “what should I listen to?”
+- “what do you like/love/enjoy most?” WHEN it refers to a music area (genre/composer/artist/instrument/mood),
+  e.g. “what jazz do you enjoy most?”, “your favorite Bach?”, “best piano trios?”
+- refinements: more like that, darker, calmer, less vocals, another one
 
-"meta":
-  - Questions about the concierge itself: what do you like, what's your favorite, do you have preferences
-  - Philosophical: how do you experience music, do you care about music, what moves you
-  - Personal: tell me about yourself, who are you (beyond basic help)
-  - Opinion requests: what should I listen to (without any criteria given)
-  - Feedback responses: that was great, I loved it, not what I wanted (without new request)
+intent="meta" if the user is talking about YOU or giving feedback WITHOUT asking for new music:
+- who are you / how do you work / how do you experience music
+- why these picks (as an explanation request)
+- feedback only: that was great / not what I wanted (no new request)
 
-"reco":
-  - Explicit requests: recommend, suggest, give me, play, find me
-  - Composer/performer mentions: Bach, Mozart, Karajan, Yo-Yo Ma
-  - Mood/vibe requests: something dark, calming music, energetic
-  - Instrument requests: piano music, violin concertos
-  - Context requests: music for studying, dinner party, workout
-  - Refinements with criteria: darker, more like that but calmer, less vocals
+intent="smalltalk" if it’s just greetings/thanks/emoji/pleasantries/basic help in any language,
+with no music request.
 
-IMPORTANT: If the user is having a conversation (asking about you, sharing feelings, giving feedback without a new request),
-classify as "meta" NOT "reco". The concierge should be able to chat without always recommending albums.
+Borderline rule:
+- If unsure between meta vs reco, prefer "reco" when the user could reasonably be expecting music suggestions.
 
-If the user says "show me something you like" or "recommend something you like", classify as "reco" (NOT "meta").
+STRATEGY (only if intent="reco"):
+- "atmos": Dolby Atmos / spatial audio -> filters.is_atmos=true; rank_by="score_poplite"
+- "deep_dive": hidden gems / obscure / underrated / surprise-me -> rank_by="score_hidden_gem"; filters.min_unique_users=0
+- "vibe": mood/activity/vibe words (dark, calm, energetic, study, sleep, dinner, workout, romantic) -> rank_by="score_sticky"
+- "performer_led": a composer/performer/ensemble/instrument is the anchor -> rank_by="score_poplite"
+- "continue": refining previous recommendations/results -> rank_by="score_sticky"
+- "gateway": otherwise -> rank_by="score_poplite"
 
-STRATEGY (only matters if intent is "reco"):
-- "gateway": general/unclear requests
-- "performer_led": specific composer or performer mentioned
-- "vibe": mood/feeling words (dark, calm, energetic, romantic)
-- "deep_dive": hidden gems, obscure, underrated
-- "atmos": Dolby Atmos, spatial audio
-- "continue": refining previous request
+QUERY + SEARCH_TERMS:
+- query should be a concise catalog search phrase with the key anchors (composer/artist/instrument/genre/mood/era).
+- search_terms are extra short keywords that help retrieval.
+- If the user asks for jazz, include "jazz" + any sub-style/instrument/artist hints in query/search_terms.
 
-FILTERS (only populate when explicitly requested):
-- Handle negations: "no opera" -> exclude_genres: ["opera"]
-- Handle "no vocals/singing" -> exclude_genres: ["opera", "vocal", "choral"]
-If the user asks for jazz, do NOT put Jazz into filters.genres. Put "jazz" into query/search_terms instead.
+IMPORTANT (jazz + missing tags):
+- Do NOT put "Jazz" into filters.genres. Rely on query/search_terms for jazz.
 
-Return ONLY valid JSON, no explanation.
+FILTERS:
+- Only populate epochs/genres/soloist_instruments/exclude_genres if the user explicitly requests them.
+- Handle negations:
+  - "no opera" -> exclude_genres: ["opera"]
+  - "no vocals/singing" -> exclude_genres: ["opera", "vocal", "choral"]
+- is_atmos: null unless explicitly requested; never set false.
+- min_unique_users: null unless deep_dive; use 0 for deep_dive.
+
+Return ONLY JSON. No markdown. No explanation.
 """.strip()
 
 
@@ -168,10 +173,6 @@ def route_message(
             "min_unique_users": parsed.get("filters", {}).get("min_unique_users"),
         },
     }
-
-    inferred = infer_filters(message)
-    if inferred.get("genres") and not route["filters"]["genres"]:
-        route["filters"]["genres"] = inferred.get("genres")
 
     return route, response_text, True, router_ms
 
