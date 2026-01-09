@@ -4,7 +4,6 @@ Quality over cost. Claude understands nuance better than keyword matching.
 """
 
 import json
-import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -34,8 +33,7 @@ Analyze the user's message and return JSON with this exact schema:
 INTENT CLASSIFICATION (most important):
 
 "smalltalk":
-  - Greetings: hi, hello, hey, yo, good morning
-  - Thanks: thanks, thank you, appreciate it
+  - Greetings/thanks/emoji in any language
   - Help: what can you do, how does this work
 
 "meta":
@@ -56,6 +54,8 @@ INTENT CLASSIFICATION (most important):
 IMPORTANT: If the user is having a conversation (asking about you, sharing feelings, giving feedback without a new request),
 classify as "meta" NOT "reco". The concierge should be able to chat without always recommending albums.
 
+If the user says "show me something you like" or "recommend something you like", classify as "reco" (NOT "meta").
+
 STRATEGY (only matters if intent is "reco"):
 - "gateway": general/unclear requests
 - "performer_led": specific composer or performer mentioned
@@ -67,32 +67,10 @@ STRATEGY (only matters if intent is "reco"):
 FILTERS (only populate when explicitly requested):
 - Handle negations: "no opera" -> exclude_genres: ["opera"]
 - Handle "no vocals/singing" -> exclude_genres: ["opera", "vocal", "choral"]
+If the user asks for jazz, do NOT put Jazz into filters.genres. Put "jazz" into query/search_terms instead.
 
 Return ONLY valid JSON, no explanation.
 """.strip()
-
-
-def should_meta(message: str) -> bool:
-    m = (message or "").strip().lower()
-    if not m:
-        return False
-
-    reco_verbs = ["recommend", "suggest", "give me", "show me", "pick", "play", "find me"]
-    if any(v in m for v in reco_verbs):
-        return False
-
-    meta_triggers = [
-        "who are you",
-        "what can you do",
-        "how do you work",
-        "how do you experience",
-        "do you like",
-        "what do you like",
-        "what's your favorite",
-        "your favorite",
-        "do you care",
-    ]
-    return any(t in m for t in meta_triggers)
 
 
 def _build_router_prompt(message: str, conversation_context: Optional[str] = None) -> str:
@@ -143,6 +121,10 @@ def _default_route(message: str) -> Dict[str, Any]:
     }
 
 
+def fast_route(message: str) -> Dict[str, Any]:
+    return _default_route(message)
+
+
 def route_message(
     message: str,
     history: List[Dict[str, str]],
@@ -157,28 +139,6 @@ def route_message(
         - router_used: Always True now (for logging compatibility)
         - router_ms: Time taken in milliseconds
     """
-    if should_meta(message):
-        return (
-            {
-                "intent": "meta",
-                "strategy": "gateway",
-                "query": message,
-                "rank_by": "score_poplite",
-                "search_terms": [],
-                "filters": {
-                    "epochs": [],
-                    "genres": [],
-                    "exclude_genres": [],
-                    "soloist_instruments": [],
-                    "is_atmos": None,
-                    "min_unique_users": None,
-                },
-            },
-            "",
-            False,
-            0,
-        )
-
     prompt = _build_router_prompt(message, conversation_context)
 
     start = time.perf_counter()
@@ -190,12 +150,12 @@ def route_message(
 
     if error or not response_text:
         print(f"Router error (using fallback): {error}")
-        return _default_route(message), "", True, router_ms
+        return fast_route(message), "", True, router_ms
 
     parsed = _parse_router_response(response_text)
     if not parsed:
         print(f"Router parse error (using fallback). Raw: {response_text[:200]}")
-        return _default_route(message), response_text, True, router_ms
+        return fast_route(message), response_text, True, router_ms
 
     route = {
         "intent": parsed.get("intent", "reco"),
@@ -252,4 +212,5 @@ __all__ = [
     "route_message",
     "format_recent",
     "build_effective_query",
+    "fast_route",
 ]

@@ -34,13 +34,16 @@ Schema:
 {intent, strategy, query, search_terms, rank_by, filters{epochs, genres, exclude_genres, soloist_instruments, is_atmos, min_unique_users}}
 
 Routing:
-- greetings/thanks/meta only => intent=smalltalk
+- greetings/thanks/emoji in any language => intent=smalltalk
 - mood words (funny/dark/calm/energetic) => strategy=vibe
 - hidden gem/obscure/surprise => strategy=deep_dive + rank_by=score_hidden_gem (strict if very niche)
 - atmos/dolby => strategy=atmos + filters.is_atmos=true
 - known composer/artist => performer_led or find
 - continue/more like this => strategy=continue
 - otherwise gateway
+
+If user says show me something you like / recommend something you like => intent=reco (NOT meta).
+If user asks for jazz, do NOT put Jazz into filters.genres. Put jazz into query/search_terms instead.
 
 Filters must be null unless explicitly requested. Never output is_atmos=false.
 If refining a prior request, preserve anchors from context in query/search_terms.

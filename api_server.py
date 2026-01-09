@@ -243,6 +243,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     effective_search_query = ""
     catalog_search_ms = 0
     writer_ms = 0
+    filters_relaxed = False
     system_prompt = ""
     user_prompt = ""
     assistant_reply = ""
@@ -349,6 +350,21 @@ def chat(request: ChatRequest) -> ChatResponse:
                 )
                 candidates = []
             catalog_search_ms = int((time.perf_counter() - search_start) * 1000)
+            if not candidates and search_filters.get("genres"):
+                relaxed_filters = dict(search_filters)
+                relaxed_filters["genres"] = []
+                relaxed_start = time.perf_counter()
+                candidates = catalog.search(
+                    {
+                        "query": effective_search_query,
+                        "mode": strategy,
+                        "filters": relaxed_filters,
+                        "rank_by": rank_by,
+                        "limit": 12,
+                    }
+                )
+                catalog_search_ms += int((time.perf_counter() - relaxed_start) * 1000)
+                filters_relaxed = True
 
             candidate_count = len(candidates)
             used_catalog = candidate_count > 0
@@ -409,6 +425,7 @@ def chat(request: ChatRequest) -> ChatResponse:
                 "router_decision": router_decision,
                 "effective_search_query": effective_search_query,
                 "rank_by": rank_by,
+                "filters_relaxed": filters_relaxed,
                 "router_ms": router_ms,
                 "catalog_search_ms": catalog_search_ms,
                 "writer_ms": writer_ms,
@@ -480,6 +497,7 @@ def chat(request: ChatRequest) -> ChatResponse:
                 "writer_ms": writer_ms,
                 "total_ms": total_ms,
             },
+            "filters_relaxed": filters_relaxed,
         }
 
     latency_ms = int((time.perf_counter() - start_time) * 1000)
@@ -500,6 +518,7 @@ def chat(request: ChatRequest) -> ChatResponse:
             "router_decision": router_decision,
             "effective_search_query": effective_search_query,
             "rank_by": rank_by,
+            "filters_relaxed": filters_relaxed,
             "router_ms": router_ms,
             "catalog_search_ms": catalog_search_ms,
             "writer_ms": writer_ms,

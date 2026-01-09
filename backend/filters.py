@@ -1,4 +1,3 @@
-import re
 from typing import Dict, Any
 
 
@@ -30,11 +29,6 @@ def infer_filters(message: str) -> Dict[str, Any]:
 
     if any(x in lowered for x in ["atmos", "dolby", "spatial", "immersive"]):
         filters["is_atmos"] = True
-
-    if re.search(r"\bjazz\b|\bswing\b|\bbebop\b|\bbig\s+band\b", lowered):
-        filters["genres"] = filters.get("genres") or []
-        if "Jazz" not in filters["genres"]:
-            filters["genres"].append("Jazz")
 
     return filters
 
