@@ -1,3 +1,4 @@
+import json
 import os
 import time
 import traceback
@@ -14,9 +15,11 @@ from backend import catalog
 from backend.prompts import (
     SYSTEM_PROMPT,
     RECO_RULES,
+    ROUTER_RULES,
     SMALLTALK_RULES_FIRST_TURN,
     SMALLTALK_RULES_ONGOING,
     build_reco_prompt,
+    build_router_prompt,
     build_smalltalk_prompt,
 )
 from backend.telemetry import (
@@ -26,6 +29,7 @@ from backend.telemetry import (
     append_jsonl,
     extract_urls_from_markdown,
 )
+from backend.llm import call_anthropic_router
 
 
 class HistoryItem(BaseModel):
@@ -150,6 +154,29 @@ def build_conversation_context(history: List[HistoryItem]) -> str:
     return "\n".join(lines)
 
 
+def _extract_json_object(text: str) -> Optional[str]:
+    if not text:
+        return None
+    text = text.strip()
+    if text.startswith("{") and text.endswith("}"):
+        return text
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        return text[start : end + 1]
+    return None
+
+
+def parse_router_response(text: str) -> Optional[Dict[str, Any]]:
+    payload = _extract_json_object(text)
+    if not payload:
+        return None
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+
+
 def call_anthropic_env(
     system: str, messages: List[Dict[str, str]], model: Optional[str] = None
 ) -> str:
@@ -222,8 +249,48 @@ def chat(request: ChatRequest) -> ChatResponse:
     conversation_context = build_conversation_context(history)
     is_first_turn = len(history) == 0
 
-    try:
+    router_payload = None
+    router_prompt = build_router_prompt(message, conversation_context=conversation_context)
+    router_text, router_error = call_anthropic_router(
+        ROUTER_RULES,
+        [{"role": "user", "content": router_prompt}],
+        model=os.getenv("CLAUDE_ROUTER_MODEL", "claude-3-haiku-20240307"),
+        max_tokens=250,
+    )
+    if router_text and not router_error:
+        router_payload = parse_router_response(router_text)
+
+    if not router_payload:
         if should_smalltalk(message, history):
+            router_payload = {
+                "intent": "smalltalk",
+                "strategy": "gateway",
+                "query": message,
+                "filters": {},
+                "rank_by": "score_poplite",
+                "need_clarifying_question": False,
+                "clarifying_question": None,
+            }
+        else:
+            mode_and_filters = infer_mode_and_filters(message)
+            router_payload = {
+                "intent": "reco",
+                "strategy": mode_and_filters["mode"],
+                "query": message,
+                "filters": mode_and_filters["filters"],
+                "rank_by": "score_poplite",
+                "need_clarifying_question": False,
+                "clarifying_question": None,
+            }
+
+    intent = (router_payload.get("intent") or "reco").strip().lower()
+    strategy = (router_payload.get("strategy") or "gateway").strip().lower()
+    rank_by = (router_payload.get("rank_by") or "score_poplite").strip()
+    query = (router_payload.get("query") or message).strip()
+    router_filters = router_payload.get("filters") or {}
+
+    try:
+        if intent == "smalltalk":
             prompt_type = "smalltalk"
             mode = "smalltalk"
             prompt = build_smalltalk_prompt(
@@ -243,13 +310,31 @@ def chat(request: ChatRequest) -> ChatResponse:
         else:
             mode = "reco"
             prompt_type = "reco"
-            mode_and_filters = infer_mode_and_filters(message)
+            search_filters: Dict[str, Any] = {}
+            if router_filters.get("epochs"):
+                search_filters["epochs"] = router_filters.get("epochs")
+            if router_filters.get("genres"):
+                search_filters["genres"] = router_filters.get("genres")
+            if router_filters.get("exclude_genres"):
+                search_filters["exclude_genres"] = router_filters.get("exclude_genres")
+            instruments = router_filters.get("instruments") or router_filters.get(
+                "soloist_instruments"
+            )
+            if instruments:
+                search_filters["soloist_instruments"] = instruments
+            if router_filters.get("is_atmos") is True:
+                search_filters["is_atmos"] = True
+            if router_filters.get("is_atmos") is False:
+                search_filters["is_atmos"] = False
+            if router_filters.get("min_unique_users") is not None:
+                search_filters["min_unique_users"] = router_filters.get("min_unique_users")
             try:
                 candidates = catalog.search(
                     {
-                        "query": message,
-                        "mode": mode_and_filters["mode"],
-                        "filters": mode_and_filters["filters"],
+                        "query": query or message,
+                        "mode": strategy,
+                        "filters": search_filters,
+                        "rank_by": rank_by,
                         "limit": 30,
                     }
                 )
@@ -279,6 +364,8 @@ def chat(request: ChatRequest) -> ChatResponse:
                 prompt = build_reco_prompt(
                     message,
                     candidates,
+                    strategy=strategy,
+                    rank_by=rank_by,
                     conversation_context=conversation_context or None,
                     history_summary=history_summary or None,
                 )

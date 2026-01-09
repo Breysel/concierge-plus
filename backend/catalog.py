@@ -152,6 +152,7 @@ def search(request: Dict[str, Any]) -> List[Dict[str, Any]]:
     mode = (request.get("mode") or "auto").strip().lower()
     filters = request.get("filters") or {}
     limit = int(request.get("limit") or 30)
+    rank_by = (request.get("rank_by") or "").strip()
 
     df = load_catalog(_resolve_catalog_path())
 
@@ -271,7 +272,11 @@ def search(request: Dict[str, Any]) -> List[Dict[str, Any]]:
         filtered = filtered.assign(final_score=final_score)
         filtered = filtered.sort_values(by=["auto_rank"]).head(limit)
     else:
-        metric, secondary = rank_metrics(mode, deep_cuts_strict)
+        if rank_by in NUM_COLS and rank_by in filtered.columns:
+            metric = rank_by
+            secondary = "score_poplite" if metric != "score_poplite" else "unique_users"
+        else:
+            metric, secondary = rank_metrics(mode, deep_cuts_strict)
         rank_values = filtered[metric].astype(float).to_numpy()
         if rank_values.size == 0:
             rank_norm = np.zeros_like(rank_values)

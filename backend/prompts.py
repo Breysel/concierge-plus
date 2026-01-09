@@ -3,6 +3,40 @@ from typing import List, Dict, Any, Optional
 
 SYSTEM_PROMPT = "Stage+ Concierge Plus (MVP)"
 
+ROUTER_RULES = """
+You are a routing assistant for a classical music concierge. Return ONLY valid JSON.
+
+Decide intent + retrieval strategy based on the latest user message and recent context.
+
+Output JSON schema (exact keys):
+{
+  "intent": "smalltalk" | "reco",
+  "strategy": "find" | "gateway" | "vibe" | "deep_dive" | "performer_led" | "atmos" | "continue",
+  "query": string,
+  "filters": {
+    "epochs": [string],
+    "genres": [string],
+    "exclude_genres": [string],
+    "instruments": [string],
+    "is_atmos": boolean,
+    "min_unique_users": number
+  },
+  "rank_by": "score_poplite" | "score_hidden_gem" | "score_hidden_gem_strict" | "score_sticky" | "unique_users",
+  "need_clarifying_question": boolean,
+  "clarifying_question": string | null
+}
+
+Rules:
+- greetings/thanks/meta only => intent="smalltalk"
+- mood words like funny/dark/calm/energetic => intent="reco", strategy="vibe"
+- "hidden gem"/"surprise me"/"obscure" => strategy="deep_dive" and rank_by="score_hidden_gem" (use strict if user says very niche)
+- if user says dolby/atmos => filters.is_atmos=true and strategy="atmos" and rank_by="score_poplite"
+- if user references a known composer/artist => strategy="performer_led" or "find"
+- "continue" when user wants more like previous results
+- query should be a concise search string (can be the user message)
+- If no filters, return empty arrays and false/0 for filters fields.
+""".strip()
+
 RECO_RULES = """
 You are a Stage+ concierge for classical music.
 Tone: warm, conversational, slightly playful, non-snobby. Avoid marketing hype.
@@ -95,6 +129,8 @@ def build_candidate_payload(candidates: List[Dict[str, Any]], limit: int = 30) -
 def build_reco_prompt(
     user_message: str,
     candidates: List[Dict[str, Any]],
+    strategy: Optional[str] = None,
+    rank_by: Optional[str] = None,
     conversation_context: Optional[str] = None,
     history_summary: Optional[str] = None,
 ) -> str:
@@ -107,6 +143,8 @@ def build_reco_prompt(
         )
     if history_summary:
         context += f"{history_summary}\n\n"
+    if strategy or rank_by:
+        context += f"Routing strategy: {strategy or 'auto'}; rank_by: {rank_by or 'score_poplite'}.\n\n"
 
     return (
         f"{context}"
@@ -132,3 +170,16 @@ def build_smalltalk_prompt(
             f"{conversation_context[:1200]}\n\n"
         )
     return f"{context}User message: {user_message}\n\n{rules}\n\nNow respond."
+
+
+def build_router_prompt(
+    user_message: str,
+    conversation_context: Optional[str] = None,
+) -> str:
+    context = ""
+    if conversation_context:
+        context = (
+            "Recent conversation (for continuity):\n"
+            f"{conversation_context[:1200]}\n\n"
+        )
+    return f"{context}User message: {user_message}"
