@@ -148,12 +148,18 @@ def _normalize_album_url(value: str) -> str:
     value = value.strip()
     lower = value.lower()
     if lower.startswith("http://") or lower.startswith("https://"):
+        value = value.replace("stageplus.com", "stage-plus.com")
+        value = value.replace("www.stageplus.com", "www.stage-plus.com")
         return value
     if lower.startswith("stageplus.com") or lower.startswith("www.stageplus.com"):
+        return f"https://{value.lstrip('/')}".replace(
+            "stageplus.com", "stage-plus.com"
+        )
+    if lower.startswith("stage-plus.com") or lower.startswith("www.stage-plus.com"):
         return f"https://{value.lstrip('/')}"
     if value.startswith("/"):
-        return f"https://www.stageplus.com{value}"
-    return f"https://www.stageplus.com/{value}"
+        return f"https://www.stage-plus.com{value}"
+    return f"https://www.stage-plus.com/{value}"
 
 
 def _is_url(value: str) -> bool:
@@ -222,6 +228,7 @@ def search(request: Dict[str, Any]) -> List[Dict[str, Any]]:
     filters = request.get("filters") or {}
     limit = int(request.get("limit") or 30)
     rank_by = (request.get("rank_by") or "").strip()
+    min_match_score = request.get("min_match_score")
 
     resolved_path = _resolve_catalog_path()
     local_path = get_catalog_local_path(resolved_path)
@@ -288,6 +295,16 @@ def search(request: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     filtered = filtered.assign(match_score=match_score)
 
+    if query_norm and min_match_score is not None:
+        try:
+            min_score = float(min_match_score)
+        except (TypeError, ValueError):
+            min_score = None
+        if min_score is not None:
+            filtered = filtered[filtered["match_score"] >= min_score]
+            if filtered.empty:
+                return []
+
     if mode == "auto":
         k = min(10, len(filtered))
         indices = []
@@ -346,11 +363,12 @@ def search(request: Dict[str, Any]) -> List[Dict[str, Any]]:
         filtered = filtered.sort_values(by=["auto_rank"]).head(limit)
     else:
         if rank_by == "match_score":
-            metric = "match_score"
-            secondary = "score_poplite"
-            filtered = filtered.sort_values(
-                by=[metric, secondary], ascending=False
-            ).head(limit)
+            filtered = (
+                filtered.sort_values(by=["match_score", "unique_users"], ascending=False)
+                .head(limit)
+                .copy()
+            )
+            filtered["final_score"] = filtered["match_score"]
         else:
             if rank_by in NUM_COLS and rank_by in filtered.columns:
                 metric = rank_by
@@ -385,6 +403,8 @@ def search(request: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     # Return is_atmos as a proper boolean for downstream prompts/UI.
     filtered["is_atmos"] = filtered["is_atmos_bool"]
+    if "final_score" not in filtered.columns:
+        filtered["final_score"] = filtered.get("match_score", 0.0)
 
     fields = [
         "container_id",
@@ -413,4 +433,8 @@ def search(request: Dict[str, Any]) -> List[Dict[str, Any]]:
         fields.insert(1, "album_url")
 
     records = filtered[fields].to_dict(orient="records")
+    if records:
+        for record in records:
+            assert "match_score" in record
+            assert "final_score" in record
     return records

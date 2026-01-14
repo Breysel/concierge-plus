@@ -1,4 +1,5 @@
 import json
+import os
 from typing import List, Dict, Any, Optional
 
 SYSTEM_PROMPT = """
@@ -79,8 +80,10 @@ How to use these signals:
 - If there are at least 2 candidates with match_score ≥ 0.35, include at least 2 of them.
 - Avoid recommending items with very low match_score (< 0.20) unless the request is extremely broad.
 - For vague requests (“something nice”, “surprise me”), it’s fine to lean more on popularity.
+Use match_score/final_score/popularity internally, but NEVER mention numeric scores or field names in the user-facing text.
 """.strip()
 
+_CANDIDATE_PAYLOAD_LIMIT = int(os.getenv("CANDIDATE_PAYLOAD_LIMIT", "22"))
 SMALLTALK_RULES_FIRST_TURN = """
 You are the Stage+ Concierge. Tone: warm, conversational, slightly playful, non-snobby.
 
@@ -149,7 +152,9 @@ Feedback: {one short feedback question}
 """.strip()
 
 
-def build_candidate_payload(candidates: List[Dict[str, Any]], limit: int = 12) -> str:
+def build_candidate_payload(
+    candidates: List[Dict[str, Any]], limit: int = _CANDIDATE_PAYLOAD_LIMIT
+) -> str:
     compact = []
     for item in candidates[:limit]:
         compact.append(
@@ -169,6 +174,7 @@ def build_candidate_payload(candidates: List[Dict[str, Any]], limit: int = 12) -
                 "score_hidden_gem": float(item.get("score_hidden_gem", 0.0) or 0.0),
                 "unique_users": int(item.get("unique_users", 0) or 0),
                 "source_lane": item.get("source_lane", "score"),
+                "final_score": float(item.get("final_score", 0.0) or 0.0),
             }
         )
     return json.dumps(compact, ensure_ascii=True, separators=(",", ":"))
