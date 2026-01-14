@@ -345,34 +345,43 @@ def search(request: Dict[str, Any]) -> List[Dict[str, Any]]:
         filtered = filtered.assign(final_score=final_score)
         filtered = filtered.sort_values(by=["auto_rank"]).head(limit)
     else:
-        if rank_by in NUM_COLS and rank_by in filtered.columns:
-            metric = rank_by
-            secondary = "score_poplite" if metric != "score_poplite" else "unique_users"
+        if rank_by == "match_score":
+            metric = "match_score"
+            secondary = "score_poplite"
+            filtered = filtered.sort_values(
+                by=[metric, secondary], ascending=False
+            ).head(limit)
         else:
-            metric, secondary = rank_metrics(mode, deep_cuts_strict)
-        rank_values = filtered[metric].astype(float).to_numpy()
-        if rank_values.size == 0:
-            rank_norm = np.zeros_like(rank_values)
-        else:
-            vmin = np.min(rank_values)
-            vmax = np.max(rank_values)
-            if vmax - vmin < 1e-9:
+            if rank_by in NUM_COLS and rank_by in filtered.columns:
+                metric = rank_by
+                secondary = (
+                    "score_poplite" if metric != "score_poplite" else "unique_users"
+                )
+            else:
+                metric, secondary = rank_metrics(mode, deep_cuts_strict)
+            rank_values = filtered[metric].astype(float).to_numpy()
+            if rank_values.size == 0:
                 rank_norm = np.zeros_like(rank_values)
             else:
-                rank_norm = (rank_values - vmin) / (vmax - vmin)
+                vmin = np.min(rank_values)
+                vmax = np.max(rank_values)
+                if vmax - vmin < 1e-9:
+                    rank_norm = np.zeros_like(rank_values)
+                else:
+                    rank_norm = (rank_values - vmin) / (vmax - vmin)
 
-        if query_norm:
-            final_score = 0.65 * match_score + 0.35 * rank_norm
-        else:
-            final_score = rank_norm
+            if query_norm:
+                final_score = 0.65 * match_score + 0.35 * rank_norm
+            else:
+                final_score = rank_norm
 
-        filtered = filtered.assign(
-            final_score=final_score,
-        )
+            filtered = filtered.assign(
+                final_score=final_score,
+            )
 
-        filtered = filtered.sort_values(
-            by=["final_score", secondary], ascending=False
-        ).head(limit)
+            filtered = filtered.sort_values(
+                by=["final_score", secondary], ascending=False
+            ).head(limit)
 
     # Return is_atmos as a proper boolean for downstream prompts/UI.
     filtered["is_atmos"] = filtered["is_atmos_bool"]

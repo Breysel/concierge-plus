@@ -46,6 +46,9 @@ _CONV_STORE: Dict[str, Dict[str, Any]] = {}
 _CONV_TTL_SEC = 24 * 3600
 _CONV_MAX_MSGS = 12
 _CONV_MAX_CONVS = 500
+LANE_SCORE_LIMIT = int(os.getenv("LANE_SCORE_LIMIT", "12"))
+LANE_FIT_LIMIT = int(os.getenv("LANE_FIT_LIMIT", "10"))
+LANE_TOTAL_LIMIT = LANE_SCORE_LIMIT + LANE_FIT_LIMIT
 
 
 class HistoryItem(BaseModel):
@@ -182,6 +185,18 @@ def build_history_summary(history: List[Dict[str, str]], current_message: str) -
     previous = "; ".join(recent)
     summary = f"User previously asked: {previous}. Now asks: {current_message}."
     return summary[:200]
+
+
+def _key_for_item(item: Dict[str, Any]) -> Optional[str]:
+    return item.get("album_url") or item.get("container_id")
+
+
+def _tag_lane(existing: Optional[str], new_lane: str) -> str:
+    if not existing:
+        return new_lane
+    if existing == new_lane:
+        return existing
+    return "both"
 
 
 def _rerank_candidates(
@@ -371,10 +386,18 @@ def chat(request: ChatRequest) -> ChatResponse:
             all_queries = [effective_search_query] + [
                 q for q in expanded_queries if q and q != effective_search_query
             ]
+
+            def _lane_sort_key(x: Dict[str, Any]) -> tuple:
+                return (
+                    float(x.get("match_score") or 0.0),
+                    float(x.get("score_poplite") or 0.0),
+                    float(x.get("unique_users") or 0.0),
+                )
+
             search_start = time.perf_counter()
             try:
-                merged_candidates: List[Dict[str, Any]] = []
-                seen_keys = set()
+                by_key: Dict[str, Dict[str, Any]] = {}
+
                 for q in all_queries:
                     results = catalog.search(
                         {
@@ -382,17 +405,64 @@ def chat(request: ChatRequest) -> ChatResponse:
                             "mode": strategy,
                             "filters": search_filters,
                             "rank_by": rank_by,
-                            "limit": 12,
+                            "limit": LANE_SCORE_LIMIT,
                         }
                     )
                     query_hit_counts[q] = len(results)
                     for item in results:
-                        key = item.get("album_url") or item.get("container_id")
-                        if not key or key in seen_keys:
+                        key = _key_for_item(item)
+                        if not key:
                             continue
-                        seen_keys.add(key)
-                        merged_candidates.append(item)
-                candidates = merged_candidates
+                        if key not in by_key:
+                            item = dict(item)
+                            item["source_lane"] = "score"
+                            by_key[key] = item
+                        else:
+                            by_key[key]["source_lane"] = _tag_lane(
+                                by_key[key].get("source_lane"), "score"
+                            )
+
+                for q in all_queries:
+                    fit_results = catalog.search(
+                        {
+                            "query": q,
+                            "mode": strategy,
+                            "filters": search_filters,
+                            "rank_by": "match_score",
+                            "limit": max(30, LANE_FIT_LIMIT),
+                        }
+                    )
+                    fit_results = sorted(
+                        fit_results,
+                        key=lambda x: float(x.get("match_score") or 0.0),
+                        reverse=True,
+                    )[:LANE_FIT_LIMIT]
+                    for item in fit_results:
+                        key = _key_for_item(item)
+                        if not key:
+                            continue
+                        if key not in by_key:
+                            item = dict(item)
+                            item["source_lane"] = "fit"
+                            by_key[key] = item
+                        else:
+                            by_key[key]["source_lane"] = _tag_lane(
+                                by_key[key].get("source_lane"), "fit"
+                            )
+
+                fit_first = [
+                    v
+                    for v in by_key.values()
+                    if v.get("source_lane") in ("fit", "both")
+                ]
+                score_only = [
+                    v for v in by_key.values() if v.get("source_lane") == "score"
+                ]
+
+                fit_first.sort(key=_lane_sort_key, reverse=True)
+                score_only.sort(key=_lane_sort_key, reverse=True)
+
+                candidates = (fit_first + score_only)[:LANE_TOTAL_LIMIT]
             except FileNotFoundError:
                 assistant_reply = (
                     "I'm having trouble accessing the music library right now. "
@@ -404,8 +474,8 @@ def chat(request: ChatRequest) -> ChatResponse:
                 relaxed_filters = dict(search_filters)
                 relaxed_filters["genres"] = []
                 relaxed_start = time.perf_counter()
-                merged_candidates = []
-                seen_keys = set()
+                by_key = {}
+
                 for q in all_queries:
                     results = catalog.search(
                         {
@@ -413,21 +483,68 @@ def chat(request: ChatRequest) -> ChatResponse:
                             "mode": strategy,
                             "filters": relaxed_filters,
                             "rank_by": rank_by,
-                            "limit": 12,
+                            "limit": LANE_SCORE_LIMIT,
                         }
                     )
                     query_hit_counts[q] = max(query_hit_counts.get(q, 0), len(results))
                     for item in results:
-                        key = item.get("album_url") or item.get("container_id")
-                        if not key or key in seen_keys:
+                        key = _key_for_item(item)
+                        if not key:
                             continue
-                        seen_keys.add(key)
-                        merged_candidates.append(item)
-                candidates = merged_candidates
+                        if key not in by_key:
+                            item = dict(item)
+                            item["source_lane"] = "score"
+                            by_key[key] = item
+                        else:
+                            by_key[key]["source_lane"] = _tag_lane(
+                                by_key[key].get("source_lane"), "score"
+                            )
+
+                for q in all_queries:
+                    fit_results = catalog.search(
+                        {
+                            "query": q,
+                            "mode": strategy,
+                            "filters": relaxed_filters,
+                            "rank_by": "match_score",
+                            "limit": max(30, LANE_FIT_LIMIT),
+                        }
+                    )
+                    fit_results = sorted(
+                        fit_results,
+                        key=lambda x: float(x.get("match_score") or 0.0),
+                        reverse=True,
+                    )[:LANE_FIT_LIMIT]
+                    for item in fit_results:
+                        key = _key_for_item(item)
+                        if not key:
+                            continue
+                        if key not in by_key:
+                            item = dict(item)
+                            item["source_lane"] = "fit"
+                            by_key[key] = item
+                        else:
+                            by_key[key]["source_lane"] = _tag_lane(
+                                by_key[key].get("source_lane"), "fit"
+                            )
+
+                fit_first = [
+                    v
+                    for v in by_key.values()
+                    if v.get("source_lane") in ("fit", "both")
+                ]
+                score_only = [
+                    v for v in by_key.values() if v.get("source_lane") == "score"
+                ]
+
+                fit_first.sort(key=_lane_sort_key, reverse=True)
+                score_only.sort(key=_lane_sort_key, reverse=True)
+
+                candidates = (fit_first + score_only)[:LANE_TOTAL_LIMIT]
                 catalog_search_ms += int((time.perf_counter() - relaxed_start) * 1000)
                 filters_relaxed = True
 
-            if candidates:
+            if candidates and os.getenv("DISABLE_TWO_LANE", "0") == "1":
                 candidates = _rerank_candidates(candidates, rank_by, limit=12)
 
             if candidates and exclude_urls:
@@ -455,6 +572,9 @@ def chat(request: ChatRequest) -> ChatResponse:
                     "score_hidden_gem": item.get("score_hidden_gem"),
                     "score_sticky": item.get("score_sticky"),
                     "unique_users": item.get("unique_users"),
+                    "match_score": item.get("match_score"),
+                    "source_lane": item.get("source_lane"),
+                    "final_score": item.get("final_score"),
                 }
                 for item in candidates[:5]
             ]
