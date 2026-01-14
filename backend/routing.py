@@ -49,6 +49,8 @@ with no music request.
 
 Borderline rule:
 - If unsure between meta vs reco, prefer "reco" when the user could reasonably be expecting music suggestions.
+- If the user message is extremely short and vague (1–2 words) and not a clear music ask,
+  prefer intent="meta" so the concierge asks a clarifying question instead of searching.
 
 STRATEGY (only if intent="reco"):
 - "atmos": Dolby Atmos / spatial audio -> filters.is_atmos=true; rank_by="score_poplite"
@@ -62,6 +64,15 @@ QUERY + SEARCH_TERMS:
 - query should be a concise catalog search phrase with the key anchors (composer/artist/instrument/genre/mood/era).
 - search_terms are extra short keywords that help retrieval.
 - If the user asks for jazz, include "jazz" + any sub-style/instrument/artist hints in query/search_terms.
+- Do not include generic terms like "classical", "music", "album" in search_terms unless user explicitly said them.
+
+MULTILINGUAL SEARCH (important):
+- The catalog metadata may be English-only.
+- If the user writes in German or Japanese, translate key anchors into English for the query.
+  Examples:
+  - “ベートーヴェン 弦楽四重奏” -> query should include “Beethoven string quartet”
+  - “ruhige Musik zum Lernen” -> include “calm study” / “focus”
+- Keep the original-language terms too (put them into search_terms) so nothing is lost.
 
 IMPORTANT (jazz + missing tags):
 - Do NOT put "Jazz" into filters.genres. Rely on query/search_terms for jazz.

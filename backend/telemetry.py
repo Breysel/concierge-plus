@@ -3,7 +3,7 @@ import json
 import os
 import re
 from threading import Lock
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 _LOG_LOCK = Lock()
 
@@ -45,9 +45,11 @@ def append_csv(path: str, header: Iterable[str], row: Iterable[Any]) -> None:
             writer.writerow(list(row))
 
 
-def extract_urls_from_markdown(text: str, max_urls: int = 3) -> List[str]:
+def extract_urls_from_markdown(text: str, max_urls: Optional[int] = 3) -> List[str]:
     if not text:
         return []
     pattern = re.compile(r"\[[^\]]+\]\((https?://[^)]+)\)")
     urls = pattern.findall(text)
+    if max_urls is None:
+        return urls
     return urls[:max_urls]

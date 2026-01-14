@@ -29,7 +29,9 @@ from backend.telemetry import (
     append_jsonl,
     extract_urls_from_markdown,
 )
+from backend.history_utils import extract_album_urls_from_history
 from backend.llm import call_anthropic_writer, DEFAULT_ROUTER_MODEL, DEFAULT_WRITER_MODEL
+from backend.query_expand import expand_queries
 from backend.routing import (
     build_effective_query,
     format_recent,
@@ -182,6 +184,31 @@ def build_history_summary(history: List[Dict[str, str]], current_message: str) -
     return summary[:200]
 
 
+def _rerank_candidates(
+    candidates: List[Dict[str, Any]], rank_by: str, limit: int = 12
+) -> List[Dict[str, Any]]:
+    if not candidates:
+        return []
+    metric = (rank_by or "").strip()
+    if not metric:
+        return candidates[:limit]
+    scored = []
+    for idx, item in enumerate(candidates):
+        value = item.get(metric)
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            score = None
+        scored.append((score, idx, item))
+    if all(score is None for score, _, _ in scored):
+        return candidates[:limit]
+    scored.sort(
+        key=lambda t: (t[0] if t[0] is not None else float("-inf")),
+        reverse=True,
+    )
+    return [item for _, _, item in scored][:limit]
+
+
 def call_anthropic_env(
     system: str, messages: List[Dict[str, str]], model: Optional[str] = None
 ) -> str:
@@ -217,6 +244,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     jsonl_path = os.path.join(log_dir, "chat_events.jsonl")
     csv_path = os.path.join(log_dir, "chat_turns.csv")
     os.makedirs(log_dir, exist_ok=True)
+    prompt_version = os.getenv("PROMPT_VERSION", "").strip() or VERSION
 
     if is_new_chat:
         append_jsonl(
@@ -241,6 +269,8 @@ def chat(request: ChatRequest) -> ChatResponse:
     top_candidates: List[Dict[str, Any]] = []
     router_decision: Optional[Dict[str, Any]] = None
     effective_search_query = ""
+    expanded_queries: List[str] = []
+    query_hit_counts: Dict[str, int] = {}
     catalog_search_ms = 0
     writer_ms = 0
     filters_relaxed = False
@@ -332,17 +362,37 @@ def chat(request: ChatRequest) -> ChatResponse:
                 strategy,
                 message,
             )
+            exclude_urls = extract_album_urls_from_history(history_for_context)
+            expanded_queries = expand_queries(
+                message,
+                conversation_context=conversation_context or None,
+                max_queries=8,
+            )
+            all_queries = [effective_search_query] + [
+                q for q in expanded_queries if q and q != effective_search_query
+            ]
             search_start = time.perf_counter()
             try:
-                candidates = catalog.search(
-                    {
-                        "query": effective_search_query,
-                        "mode": strategy,
-                        "filters": search_filters,
-                        "rank_by": rank_by,
-                        "limit": 12,
-                    }
-                )
+                merged_candidates: List[Dict[str, Any]] = []
+                seen_keys = set()
+                for q in all_queries:
+                    results = catalog.search(
+                        {
+                            "query": q,
+                            "mode": strategy,
+                            "filters": search_filters,
+                            "rank_by": rank_by,
+                            "limit": 12,
+                        }
+                    )
+                    query_hit_counts[q] = len(results)
+                    for item in results:
+                        key = item.get("album_url") or item.get("container_id")
+                        if not key or key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        merged_candidates.append(item)
+                candidates = merged_candidates
             except FileNotFoundError:
                 assistant_reply = (
                     "I'm having trouble accessing the music library right now. "
@@ -354,17 +404,46 @@ def chat(request: ChatRequest) -> ChatResponse:
                 relaxed_filters = dict(search_filters)
                 relaxed_filters["genres"] = []
                 relaxed_start = time.perf_counter()
-                candidates = catalog.search(
-                    {
-                        "query": effective_search_query,
-                        "mode": strategy,
-                        "filters": relaxed_filters,
-                        "rank_by": rank_by,
-                        "limit": 12,
-                    }
-                )
+                merged_candidates = []
+                seen_keys = set()
+                for q in all_queries:
+                    results = catalog.search(
+                        {
+                            "query": q,
+                            "mode": strategy,
+                            "filters": relaxed_filters,
+                            "rank_by": rank_by,
+                            "limit": 12,
+                        }
+                    )
+                    query_hit_counts[q] = max(query_hit_counts.get(q, 0), len(results))
+                    for item in results:
+                        key = item.get("album_url") or item.get("container_id")
+                        if not key or key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        merged_candidates.append(item)
+                candidates = merged_candidates
                 catalog_search_ms += int((time.perf_counter() - relaxed_start) * 1000)
                 filters_relaxed = True
+
+            if candidates:
+                candidates = _rerank_candidates(candidates, rank_by, limit=12)
+
+            if candidates and exclude_urls:
+                unfiltered_candidates = candidates
+                candidates = [
+                    item
+                    for item in unfiltered_candidates
+                    if item.get("album_url") not in exclude_urls
+                ]
+                if len(candidates) < min(12, len(unfiltered_candidates)):
+                    for item in unfiltered_candidates:
+                        if item in candidates:
+                            continue
+                        candidates.append(item)
+                        if len(candidates) >= 12:
+                            break
 
             candidate_count = len(candidates)
             used_catalog = candidate_count > 0
@@ -426,17 +505,23 @@ def chat(request: ChatRequest) -> ChatResponse:
                 "effective_search_query": effective_search_query,
                 "rank_by": rank_by,
                 "filters_relaxed": filters_relaxed,
+                "expanded_queries": expanded_queries,
+                "query_hit_counts": query_hit_counts,
                 "router_ms": router_ms,
                 "catalog_search_ms": catalog_search_ms,
                 "writer_ms": writer_ms,
                 "total_ms": latency_ms,
                 "prompt_type": prompt_type,
+                "prompt_version": prompt_version,
                 "anthropic_model": model_name,
                 "system_prompt_sent_to_claude": truncate(system_prompt),
                 "user_prompt_sent_to_claude": truncate(user_prompt),
                 "system_prompt_len": len(system_prompt),
                 "user_prompt_len": len(user_prompt),
                 "assistant_reply": assistant_reply,
+                "assistant_reply_full": assistant_reply,
+                "assistant_reply_preview": truncate(assistant_reply, 400),
+                "recommended_urls": extract_urls_from_markdown(assistant_reply, max_urls=None),
                 "latency_ms": latency_ms,
                 "error": error_detail,
             },
@@ -519,17 +604,23 @@ def chat(request: ChatRequest) -> ChatResponse:
             "effective_search_query": effective_search_query,
             "rank_by": rank_by,
             "filters_relaxed": filters_relaxed,
+            "expanded_queries": expanded_queries,
+            "query_hit_counts": query_hit_counts,
             "router_ms": router_ms,
             "catalog_search_ms": catalog_search_ms,
             "writer_ms": writer_ms,
             "total_ms": latency_ms,
             "prompt_type": prompt_type,
+            "prompt_version": prompt_version,
             "anthropic_model": model_name,
             "system_prompt_sent_to_claude": truncate(system_prompt),
             "user_prompt_sent_to_claude": truncate(user_prompt),
             "system_prompt_len": len(system_prompt),
             "user_prompt_len": len(user_prompt),
             "assistant_reply": assistant_reply,
+            "assistant_reply_full": assistant_reply,
+            "assistant_reply_preview": truncate(assistant_reply, 400),
+            "recommended_urls": extract_urls_from_markdown(assistant_reply, max_urls=None),
             "latency_ms": latency_ms,
             "error": error_detail,
         },
