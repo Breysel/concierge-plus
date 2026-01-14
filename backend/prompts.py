@@ -62,6 +62,25 @@ then ask one short question to broaden the search.
 Follow the output format as closely as possible.
 """.strip()
 
+RANKING_SIGNAL_RULES = """
+Candidate JSON includes ranking signals to help you choose:
+
+- match_score (0.0–1.0): how well this album matches the user's request
+- score_poplite / score_sticky / score_hidden_gem: popularity or engagement signals
+- unique_users: rough popularity indicator
+- source_lane:
+  - "fit": selected for relevance to the request
+  - "score": selected for popularity/engagement
+  - "both": strong relevance AND popularity
+
+How to use these signals:
+- For specific requests (e.g. “baroque opera”, “jazz”, “music for children”, composer/work names),
+  prioritize albums with HIGH match_score and prefer items from the "fit" or "both" lane.
+- If there are at least 2 candidates with match_score ≥ 0.35, include at least 2 of them.
+- Avoid recommending items with very low match_score (< 0.20) unless the request is extremely broad.
+- For vague requests (“something nice”, “surprise me”), it’s fine to lean more on popularity.
+""".strip()
+
 SMALLTALK_RULES_FIRST_TURN = """
 You are the Stage+ Concierge. Tone: warm, conversational, slightly playful, non-snobby.
 
@@ -144,6 +163,12 @@ def build_candidate_payload(candidates: List[Dict[str, Any]], limit: int = 12) -
                 "primary_instrument": item.get("primary_instrument"),
                 "soloist_instruments": item.get("soloist_instruments"),
                 "is_atmos": bool(item.get("is_atmos", False)),
+                "match_score": float(item.get("match_score", 0.0) or 0.0),
+                "score_poplite": float(item.get("score_poplite", 0.0) or 0.0),
+                "score_sticky": float(item.get("score_sticky", 0.0) or 0.0),
+                "score_hidden_gem": float(item.get("score_hidden_gem", 0.0) or 0.0),
+                "unique_users": int(item.get("unique_users", 0) or 0),
+                "source_lane": item.get("source_lane", "score"),
             }
         )
     return json.dumps(compact, ensure_ascii=True, separators=(",", ":"))
@@ -173,6 +198,7 @@ def build_reco_prompt(
         f"{context}"
         f"User request: {user_message}\n\n"
         f"{RECO_RULES}\n\n"
+        f"{RANKING_SIGNAL_RULES}\n\n"
         "Candidate albums JSON (ONLY allowed source for picks):\n"
         f"{payload}\n\n"
         f"{RECO_OUTPUT_FORMAT}\n\n"
