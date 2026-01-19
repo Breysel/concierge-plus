@@ -78,6 +78,18 @@ Check service status.
 - Build command: `pip install -r requirements.txt`
 - Start command: `uvicorn api_server:app --host 0.0.0.0 --port $PORT`
 
+## Evaluation Suite
+
+Run the chat suite locally:
+```bash
+python eval/run_chat_suite.py --base-url http://localhost:8000
+```
+
+Run the chat suite against Render:
+```bash
+python eval/run_chat_suite.py --base-url https://concierge-plus-api.onrender.com --sleep-ms 800
+```
+
 ## Project Structure
 ```
 .
