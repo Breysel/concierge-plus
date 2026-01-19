@@ -23,29 +23,29 @@ eval/
 
 ```mermaid
 flowchart TB
-    subgraph TestDefinitions["📋 Test Definitions"]
-        ST[SINGLE_TURN_CASES<br/>46 cases]
-        MT[MULTI_TURN_SCENARIOS<br/>5 scenarios, 15 turns]
+    subgraph TestDefinitions["Test Definitions"]
+        ST["SINGLE_TURN_CASES\n46 cases"]
+        MT["MULTI_TURN_SCENARIOS\n5 scenarios, 15 turns"]
     end
 
-    subgraph Runner["🏃 Test Runner"]
-        RUN[run_chat_suite.py]
-        POST[POST /chat]
-        CHECK[Validation Logic]
+    subgraph Runner["Test Runner"]
+        RUN["run_chat_suite.py"]
+        POST["POST to chat endpoint"]
+        CHECK["Validation Logic"]
     end
 
-    subgraph API["🎯 Concierge API"]
-        CHAT[/chat endpoint]
+    subgraph API["Concierge API"]
+        CHAT["chat endpoint"]
     end
 
-    subgraph Scoring["📊 Scoring"]
-        SCORE[score_chat_suite.py]
-        COMPARE[Run Comparison]
+    subgraph Scoring["Scoring"]
+        SCORE["score_chat_suite.py"]
+        COMPARE["Run Comparison"]
     end
 
-    subgraph Output["📁 Output"]
-        JSONL[results/*.jsonl]
-        SUMMARY[Console Summary]
+    subgraph Output["Output"]
+        JSONL["results/*.jsonl"]
+        SUMMARY["Console Summary"]
     end
 
     ST --> RUN
@@ -102,7 +102,7 @@ Scenarios test conversation continuity across multiple exchanges:
 
 | Intent | Description | Album URLs Expected | Example Messages |
 |--------|-------------|---------------------|------------------|
-| `smalltalk` | Greetings, thanks, help | 0 | "yo", "hi there", "👍", "what can you do?" |
+| `smalltalk` | Greetings, thanks, help | 0 | "yo", "hi there", "what can you do?" |
 | `meta` | Questions about the concierge | 0 | "who are you?", "why these picks?", "that was great!" |
 | `reco` | Music recommendation requests | 1-3 | "Bach", "jazz", "something calming" |
 
@@ -142,35 +142,35 @@ Multi-Turn Scenarios: 5 (15 total turns)
 
 ```mermaid
 flowchart TD
-    START[Receive API Response] --> HTTP{HTTP 200?}
+    START["Receive API Response"] --> HTTP{"HTTP 200?"}
     
-    HTTP -->|No| FAIL1[❌ FAIL: http_status]
-    HTTP -->|Yes| MODE{Mode matches<br/>expected_mode?}
+    HTTP -->|No| FAIL1["FAIL: http_status"]
+    HTTP -->|Yes| MODE{"Mode matches\nexpected_mode?"}
     
-    MODE -->|No| FAIL2[❌ FAIL: mode_expected_X]
-    MODE -->|Yes| INTENT{Check by intent type}
+    MODE -->|No| FAIL2["FAIL: mode_expected_X"]
+    MODE -->|Yes| INTENT{"Check by intent type"}
     
-    INTENT -->|smalltalk/meta| URL_ZERO{Album URLs = 0?}
-    INTENT -->|reco| URL_RANGE{URLs in<br/>min..max range?}
+    INTENT -->|smalltalk/meta| URL_ZERO{"Album URLs = 0?"}
+    INTENT -->|reco| URL_RANGE{"URLs in\nmin..max range?"}
     
-    URL_ZERO -->|No| FAIL3[❌ FAIL: unexpected_album_url]
+    URL_ZERO -->|No| FAIL3["FAIL: unexpected_album_url"]
     URL_ZERO -->|Yes| LANG
     
-    URL_RANGE -->|No| FAIL4[❌ FAIL: album_url_count_out_of_range]
-    URL_RANGE -->|Yes| FOLLOWUP{Has Follow-up:<br/>and Feedback:?}
+    URL_RANGE -->|No| FAIL4["FAIL: album_url_count_out_of_range"]
+    URL_RANGE -->|Yes| FOLLOWUP{"Has Follow-up\nand Feedback?"}
     
-    FOLLOWUP -->|No & Required| FAIL5[❌ FAIL: missing_followup/feedback]
+    FOLLOWUP -->|No, Required| FAIL5["FAIL: missing_followup"]
     FOLLOWUP -->|Yes or Not Required| LANG
     
-    LANG[Language Check] --> LANG_OK{Response in<br/>expected language?}
+    LANG["Language Check"] --> LANG_OK{"Response in\nexpected language?"}
     
-    LANG_OK -->|No| FAIL6[❌ FAIL: lang_expected_X]
-    LANG_OK -->|Yes| LEAK[Leak Check]
+    LANG_OK -->|No| FAIL6["FAIL: lang_expected_X"]
+    LANG_OK -->|Yes| LEAK["Leak Check"]
     
-    LEAK --> LEAK_OK{No internal<br/>tokens leaked?}
+    LEAK --> LEAK_OK{"No internal\ntokens leaked?"}
     
-    LEAK_OK -->|No| FAIL7[❌ FAIL: leak: tokens]
-    LEAK_OK -->|Yes| PASS[✅ PASS]
+    LEAK_OK -->|No| FAIL7["FAIL: leak detected"]
+    LEAK_OK -->|Yes| PASS["PASS"]
 ```
 
 ### Leak Detection
@@ -227,17 +227,17 @@ python eval/run_chat_suite.py \
 ```mermaid
 sequenceDiagram
     participant Runner as run_chat_suite.py
-    participant API as /chat API
-    participant Results as results/*.jsonl
+    participant API as Chat API
+    participant Results as results JSONL
 
     Runner->>Runner: Load SINGLE_TURN_CASES
     
     loop Each Single-Turn Case
-        Runner->>API: POST /chat {message, debug}
-        API-->>Runner: {reply, mode, conversation_id}
+        Runner->>API: POST message + debug flag
+        API-->>Runner: reply + mode + conversation_id
         Runner->>Runner: Validate response
         Runner->>Results: Append result row
-        Runner->>Runner: Sleep (rate limit)
+        Runner->>Runner: Sleep for rate limit
     end
 
     Runner->>Runner: Load MULTI_TURN_SCENARIOS
@@ -245,11 +245,11 @@ sequenceDiagram
     loop Each Scenario
         Runner->>Runner: Generate conversation_id
         loop Each Turn
-            Runner->>API: POST /chat {message, conversation_id}
-            API-->>Runner: {reply, mode}
+            Runner->>API: POST message + conversation_id
+            API-->>Runner: reply + mode
             Runner->>Runner: Validate response
             Runner->>Results: Append result row
-            Runner->>Runner: Sleep (rate limit)
+            Runner->>Runner: Sleep for rate limit
         end
     end
 
@@ -282,7 +282,7 @@ Each test produces a JSON line:
     "reply": "Looking for Bach...",
     "mode": "reco",
     "conversation_id": "uuid",
-    "debug": {...}
+    "debug": {}
   },
   "latency_ms": 2450,
   "extracted_album_urls": [
@@ -298,14 +298,13 @@ Each test produces a JSON line:
 ```json
 {
   "scenario_id": "mt_en_jazz_refine",
-  "turn_idx": 2,
-  ...
+  "turn_idx": 2
 }
 ```
 
 ---
 
-## Scoring & Analysis
+## Scoring and Analysis
 
 ### Basic Scoring
 
@@ -357,31 +356,31 @@ Missing cases in compare run:
 ```mermaid
 flowchart LR
     subgraph Input
-        JSONL1[Run A.jsonl]
-        JSONL2[Run B.jsonl]
+        JSONL1["Run A.jsonl"]
+        JSONL2["Run B.jsonl"]
     end
 
     subgraph Summarize
-        S1[Count passes/fails]
-        S2[Aggregate latencies]
-        S3[Group by mode]
-        S4[Collect fail reasons]
+        S1["Count passes and fails"]
+        S2["Aggregate latencies"]
+        S3["Group by mode"]
+        S4["Collect fail reasons"]
     end
 
     subgraph Compare
-        C1[Pass rate delta]
-        C2[Latency delta]
-        C3[Find regressions]
+        C1["Pass rate delta"]
+        C2["Latency delta"]
+        C3["Find regressions"]
     end
 
     subgraph Output
-        CONSOLE[Console Report]
+        CONSOLE["Console Report"]
     end
 
     JSONL1 --> S1 --> CONSOLE
     S1 --> S2 --> S3 --> S4
-    JSONL1 --> Compare
-    JSONL2 --> Compare
+    JSONL1 --> C1
+    JSONL2 --> C1
     C1 --> C2 --> C3 --> CONSOLE
 ```
 
@@ -395,7 +394,7 @@ flowchart LR
 | **Avg Latency** | Mean response time (ms) | Performance monitoring |
 | **Mode Accuracy** | Correct intent classification | Router quality |
 | **Language Accuracy** | Responses in expected language | i18n quality |
-| **Leak Rate** | Internal details exposed | Security/UX |
+| **Leak Rate** | Internal details exposed | Security and UX |
 | **URL Count** | Album links per response | Recommendation completeness |
 
 ---
@@ -449,8 +448,8 @@ jobs:
 
 | Gate | Threshold | Action |
 |------|-----------|--------|
-| Pass Rate | ≥ 90% | Block merge if below |
-| Avg Latency | ≤ 5000ms | Warning if exceeded |
+| Pass Rate | >= 90% | Block merge if below |
+| Avg Latency | <= 5000ms | Warning if exceeded |
 | Leak Detection | 0 leaks | Block merge if any |
 
 ---
