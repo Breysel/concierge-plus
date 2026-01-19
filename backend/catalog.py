@@ -363,12 +363,14 @@ def search(request: Dict[str, Any]) -> List[Dict[str, Any]]:
         filtered = filtered.sort_values(by=["auto_rank"]).head(limit)
     else:
         if rank_by == "match_score":
-            filtered = (
-                filtered.sort_values(by=["match_score", "unique_users"], ascending=False)
-                .head(limit)
-                .copy()
-            )
-            filtered["final_score"] = filtered["match_score"]
+            secondary = "unique_users"
+            filtered = filtered.sort_values(
+                by=["match_score", secondary], ascending=False
+            ).head(limit)
+            if "match_score" in filtered.columns:
+                filtered = filtered.assign(final_score=filtered["match_score"].astype(float))
+            else:
+                filtered = filtered.assign(match_score=0.0, final_score=0.0)
         else:
             if rank_by in NUM_COLS and rank_by in filtered.columns:
                 metric = rank_by
@@ -403,8 +405,9 @@ def search(request: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     # Return is_atmos as a proper boolean for downstream prompts/UI.
     filtered["is_atmos"] = filtered["is_atmos_bool"]
-    if "final_score" not in filtered.columns:
-        filtered["final_score"] = filtered.get("match_score", 0.0)
+    for col in ("match_score", "final_score"):
+        if col not in filtered.columns:
+            filtered[col] = 0.0
 
     fields = [
         "container_id",

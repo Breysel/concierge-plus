@@ -37,20 +37,23 @@ intent="reco" if the user is asking for music to listen to now:
 - “what should I listen to?”
 - “what do you like/love/enjoy most?” WHEN it refers to a music area (genre/composer/artist/instrument/mood),
   e.g. “what jazz do you enjoy most?”, “your favorite Bach?”, “best piano trios?”
+- single-word composer/performer requests: “Bach”, “Mozart”, “Mahler”
+- constraints/refinements: “no vocals”, “instrumental only”, “no singing”
 - refinements: more like that, darker, calmer, less vocals, another one
 
 intent="meta" if the user is talking about YOU or giving feedback WITHOUT asking for new music:
 - who are you / how do you work / how do you experience music
 - why these picks (as an explanation request)
-- feedback only: that was great / not what I wanted (no new request)
+- feedback only: that was great / not what I wanted (no new request), even if it includes thanks or emojis
 
 intent="smalltalk" if it’s just greetings/thanks/emoji/pleasantries/basic help in any language,
 with no music request.
+Examples include: “what can you do”, “how does this work”, “help”
 
 Borderline rule:
 - If unsure between meta vs reco, prefer "reco" when the user could reasonably be expecting music suggestions.
-- If the user message is extremely short and vague (1–2 words) and not a clear music ask,
-  prefer intent="meta" so the concierge asks a clarifying question instead of searching.
+- For 1–2 word messages: choose "reco" if it resembles a music request (composer/genre/instrument/epoch/vibe/constraint).
+  Use "smalltalk" for help/greetings. Use "meta" only if it’s about the concierge.
 
 STRATEGY (only if intent="reco"):
 - "atmos": Dolby Atmos / spatial audio -> filters.is_atmos=true; rank_by="score_poplite"
