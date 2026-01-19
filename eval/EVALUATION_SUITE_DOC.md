@@ -119,7 +119,7 @@ Scenarios test conversation continuity across multiple exchanges:
 ```
 Single-Turn Cases: 46
 ├── smalltalk: 6 cases
-├── meta: 7 cases
+├── meta: 7 cases  
 └── reco: 33 cases
     ├── Vibe/mood: 5 (calming, energetic, study, dinner, children)
     ├── Composer/work: 10 (Bach, Beethoven, Mozart, Mahler, etc.)
@@ -143,32 +143,32 @@ Multi-Turn Scenarios: 5 (15 total turns)
 ```mermaid
 flowchart TD
     START[Receive API Response] --> HTTP{HTTP 200?}
-
+    
     HTTP -->|No| FAIL1[❌ FAIL: http_status]
     HTTP -->|Yes| MODE{Mode matches<br/>expected_mode?}
-
+    
     MODE -->|No| FAIL2[❌ FAIL: mode_expected_X]
     MODE -->|Yes| INTENT{Check by intent type}
-
+    
     INTENT -->|smalltalk/meta| URL_ZERO{Album URLs = 0?}
     INTENT -->|reco| URL_RANGE{URLs in<br/>min..max range?}
-
+    
     URL_ZERO -->|No| FAIL3[❌ FAIL: unexpected_album_url]
     URL_ZERO -->|Yes| LANG
-
+    
     URL_RANGE -->|No| FAIL4[❌ FAIL: album_url_count_out_of_range]
     URL_RANGE -->|Yes| FOLLOWUP{Has Follow-up:<br/>and Feedback:?}
-
+    
     FOLLOWUP -->|No & Required| FAIL5[❌ FAIL: missing_followup/feedback]
     FOLLOWUP -->|Yes or Not Required| LANG
-
+    
     LANG[Language Check] --> LANG_OK{Response in<br/>expected language?}
-
+    
     LANG_OK -->|No| FAIL6[❌ FAIL: lang_expected_X]
     LANG_OK -->|Yes| LEAK[Leak Check]
-
+    
     LEAK --> LEAK_OK{No internal<br/>tokens leaked?}
-
+    
     LEAK_OK -->|No| FAIL7[❌ FAIL: leak: tokens]
     LEAK_OK -->|Yes| PASS[✅ PASS]
 ```
@@ -181,7 +181,7 @@ The suite checks for internal implementation details that should never appear in
 LEAK_TOKENS = [
     "Candidate JSON",
     "routing",
-    "router",
+    "router", 
     "rank_by",
     "filters_relaxed",
     "system prompt"
@@ -191,7 +191,6 @@ LEAK_TOKENS = [
 ### Album URL Extraction
 
 URLs are extracted using this pattern:
-
 ```regex
 https?://[^\s)]+/audio/album_[A-Za-z0-9]+
 ```
@@ -232,7 +231,7 @@ sequenceDiagram
     participant Results as results/*.jsonl
 
     Runner->>Runner: Load SINGLE_TURN_CASES
-
+    
     loop Each Single-Turn Case
         Runner->>API: POST /chat {message, debug}
         API-->>Runner: {reply, mode, conversation_id}
@@ -242,7 +241,7 @@ sequenceDiagram
     end
 
     Runner->>Runner: Load MULTI_TURN_SCENARIOS
-
+    
     loop Each Scenario
         Runner->>Runner: Generate conversation_id
         loop Each Turn
@@ -315,7 +314,6 @@ python eval/score_chat_suite.py eval/results/chat_suite_20250119.jsonl
 ```
 
 Output:
-
 ```
 Chat suite score
 Total: 61  Pass: 58  Fail: 3
@@ -345,7 +343,6 @@ python eval/score_chat_suite.py \
 ```
 
 Output:
-
 ```
 Comparison
 Pass rate delta: -2.00%
@@ -416,15 +413,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
+      
       - name: Install dependencies
         run: pip install -r requirements.txt
-
+      
       - name: Start server
         run: |
           uvicorn api_server:app --port 8000 &
@@ -432,15 +429,15 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CATALOG_CSV_PATH: ${{ secrets.CATALOG_CSV_PATH }}
-
+      
       - name: Run eval suite
         run: python eval/run_chat_suite.py --base-url http://localhost:8000
-
+      
       - name: Score results
         run: |
           LATEST=$(ls -t eval/results/*.jsonl | head -1)
           python eval/score_chat_suite.py "$LATEST"
-
+      
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
@@ -492,7 +489,7 @@ MULTI_TURN_SCENARIOS.append({
             "require_followup_feedback": False,
         },
         {
-            "id": "mt_new_scenario_2",
+            "id": "mt_new_scenario_2", 
             "message": "follow-up message",
             "expected_mode": "reco",
             "lang_seen": "en",
@@ -528,7 +525,6 @@ python eval/run_chat_suite.py --debug true
 ```
 
 Response will include:
-
 ```json
 {
   "debug": {
@@ -547,5 +543,5 @@ Response will include:
 
 ---
 
-*Document version: 1.0*
+*Document version: 1.0*  
 *Last updated: January 2025*
